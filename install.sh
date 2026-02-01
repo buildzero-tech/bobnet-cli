@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.2"
+BOBNET_CLI_VERSION="3.9.3"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -96,6 +96,7 @@ warn() { echo -e "${YELLOW}warn:${NC} $*" >&2; }
 success() { echo -e "${GREEN}✓${NC} $*"; }
 
 cmd_status() {
+    [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { echo "Usage: bobnet status"; echo ""; echo "Show agents, repo status, and encryption state."; return 0; }
     print_agent_summary
     echo ""; echo "Repository: $BOBNET_ROOT"
     echo "CLI: v$BOBNET_CLI_VERSION"
@@ -106,6 +107,23 @@ cmd_status() {
 }
 
 cmd_install() {
+    [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && {
+        cat <<'EOF'
+Usage: bobnet install
+
+Configure OpenClaw with BobNet agents, bindings, and channels from schema.
+
+This will:
+  • Backup existing config (if not already backed up)
+  • Add all agents from schema to OpenClaw
+  • Apply bindings from schema
+  • Apply channel configs from schema
+  • Run validation
+
+Run 'openclaw gateway restart' after to apply changes.
+EOF
+        return 0
+    }
     echo "Installing BobNet agents into $CLI_NAME..."
     local claw=""
     command -v openclaw &>/dev/null && claw="openclaw"
@@ -693,14 +711,19 @@ EOF
 }
 
 cmd_unlock() {
+    [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { echo "Usage: bobnet unlock [keyfile]"; echo ""; echo "Unlock git-crypt. Default key: ~/.secrets/bobnet-vault.key"; return 0; }
     local key="${1:-$HOME/.secrets/bobnet-vault.key}"
     [[ -f "$key" ]] || error "Key not found: $key"
     cd "$BOBNET_ROOT" && git-crypt unlock "$key" && echo "Unlocked ✓"
 }
 
-cmd_lock() { cd "$BOBNET_ROOT" && git-crypt lock && echo "Locked ✓"; }
+cmd_lock() {
+    [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { echo "Usage: bobnet lock"; echo ""; echo "Lock git-crypt (encrypts agents/ directory)."; return 0; }
+    cd "$BOBNET_ROOT" && git-crypt lock && echo "Locked ✓"
+}
 
 cmd_update() {
+    [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { echo "Usage: bobnet update"; echo ""; echo "Update bobnet CLI to the latest version from GitHub."; return 0; }
     echo "Checking for updates..."
     local current="$BOBNET_CLI_VERSION"
     local remote=$(curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" 2>/dev/null | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
