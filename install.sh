@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.1"
+BOBNET_CLI_VERSION="3.9.2"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -51,7 +51,14 @@ install_cli() {
 #!/bin/bash
 set -euo pipefail
 BOBNET_ROOT="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
-AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.json}"
+# Schema location (try new name, fall back to old)
+if [[ -f "$BOBNET_ROOT/config/agents-schema.json" ]]; then
+    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.json}"
+elif [[ -f "$BOBNET_ROOT/config/agents-schema.v3.json" ]]; then
+    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.v3.json}"
+else
+    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.json}"
+fi
 command -v jq &>/dev/null || { echo "jq required" >&2; exit 1; }
 get_all_agents() { jq -r '.agents | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""; }
 get_agent_scope() { jq -r --arg a "$1" '.agents[$a].scope // "work"' "$AGENTS_SCHEMA" 2>/dev/null; }
@@ -608,6 +615,20 @@ EOF
     fi
     
     echo ""
+    
+    # Safety check: refuse to wipe everything
+    local schema_agent_count=$(get_all_agents | wc -w | tr -d ' ')
+    local schema_binding_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+    
+    if [[ "$schema_agent_count" -eq 0 ]]; then
+        echo -e "${RED}ERROR:${NC} Schema has 0 agents - refusing to sync"
+        echo "  This would wipe all agents from config!"
+        echo "  Check: $AGENTS_SCHEMA"
+        echo ""
+        echo "  Did you pull the latest repo?"
+        echo "    cd \$BOBNET_ROOT && git pull"
+        return 1
+    fi
     
     # Summary
     if [[ ${#changes[@]} -eq 0 ]]; then
