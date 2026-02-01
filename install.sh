@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.6"
+BOBNET_CLI_VERSION="4.0.7"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -911,10 +911,11 @@ cmd_validate() {
                 ((failures++))
             fi
             
-            # 2. No orphan agents in config
+            # 2. No orphan agents in config (include main in check - it's a valid schema agent)
+            local all_schema_agents=$(get_all_agents | sort)
             local orphans=""
             for agent in $config_agents; do
-                echo "$schema_agents" | grep -q "^${agent}$" || orphans="$orphans $agent"
+                echo "$all_schema_agents" | grep -q "^${agent}$" || orphans="$orphans $agent"
             done
             if [[ -z "$orphans" ]]; then
                 success "No orphan agents in config"
