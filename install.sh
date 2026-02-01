@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.6.0"
+BOBNET_CLI_VERSION="3.6.1"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -184,7 +184,7 @@ EOF
         echo "  [M]ove   → Move to ~/$repo_name"
         echo "  [K]eep   → Keep in ~/.bobnet/ (default)"
         echo "  [D]elete → Delete entirely"
-        read -p "Choice [M/k/d]: " -n 1 -r; echo ""
+        read -p "Choice [m/K/d]: " -n 1 -r; echo ""
         case "$REPLY" in
             [Mm]) repo_action="move" ;;
             [Dd]) repo_action="delete" ;;
