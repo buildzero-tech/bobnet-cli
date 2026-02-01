@@ -151,27 +151,21 @@ cmd_setup() {
     command -v openclaw &>/dev/null && claw="openclaw"
     [[ -z "$claw" ]] && { echo "openclaw/clawdbot not found" >&2; exit 1; }
     
-    # Stop gateway to prevent restart on each config change
-    echo "  Stopping gateway..."
-    $claw gateway stop 2>/dev/null || true
-    
-    # Set default workspace
-    $claw config set agents.defaults.workspace "$(get_workspace bob)" >/dev/null
-    
-    # Set each agent
-    local i=0
+    # Build agents list JSON
+    local list='['
+    local first=true
     for agent in $(get_all_agents); do
         local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
-        $claw config set "agents.list[$i].id" "$id" >/dev/null
-        $claw config set "agents.list[$i].workspace" "$(get_workspace "$agent")" >/dev/null
-        $claw config set "agents.list[$i].agentDir" "$(get_agent_dir "$agent")" >/dev/null
+        $first || list+=','
+        first=false
+        list+="{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\"}"
         echo "  ✓ $id"
-        ((i++))
     done
+    list+=']'
     
-    # Start gateway
-    echo "  Starting gateway..."
-    $claw gateway start
+    # Single config update
+    $claw config set agents.defaults.workspace "$(get_workspace bob)"
+    $claw config set agents.list "$list" --json
     
     echo "Done ✓"
 }
