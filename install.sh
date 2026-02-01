@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.7.2"
+BOBNET_CLI_VERSION="3.8.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -51,7 +51,7 @@ install_cli() {
 #!/bin/bash
 set -euo pipefail
 BOBNET_ROOT="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
-AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.v3.json}"
+AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.json}"
 command -v jq &>/dev/null || { echo "jq required" >&2; exit 1; }
 get_all_agents() { jq -r '.agents | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""; }
 get_agent_scope() { jq -r --arg a "$1" '.agents[$a].scope // "work"' "$AGENTS_SCHEMA" 2>/dev/null; }
@@ -122,6 +122,12 @@ cmd_install() {
     $claw config set agents.defaults.workspace "$(get_workspace bob)"
     $claw config set agents.list "$list" --json
     [[ "$bind_count" -gt 0 ]] && $claw config set bindings "$bindings" --json && success "bindings: $bind_count"
+    
+    # Apply channel configs from schema
+    for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
+        local channel_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
+        $claw config set "channels.$channel" "$channel_config" --json 2>/dev/null && success "channel: $channel"
+    done
     
     echo ""; success "BobNet installed"
     echo "  Run '$claw gateway restart' to apply"
@@ -285,7 +291,7 @@ cmd_agent() {
             # Check agent in schema
             local schema_name="$name"; [[ "$name" == "main" ]] && schema_name="bob"
             if ! jq -e --arg a "$schema_name" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
-                error "Agent '$name' not in schema. Add to agents-schema.v3.json first."
+                error "Agent '$name' not in schema. Add to agents-schema.json first."
             fi
             
             local ws=$(get_workspace "$schema_name")
@@ -716,7 +722,7 @@ set -euo pipefail
 
 # Find BOBNET_ROOT (may not exist)
 if [[ -n "${BOBNET_ROOT:-}" ]]; then :
-elif [[ -f "./config/agents-schema.v3.json" ]]; then BOBNET_ROOT="$(pwd)"
+elif [[ -f "./config/agents-schema.json" ]]; then BOBNET_ROOT="$(pwd)"
 elif [[ -d "$HOME/.bobnet/ultima-thule" ]]; then BOBNET_ROOT="$HOME/.bobnet/ultima-thule"
 else BOBNET_ROOT=""; fi
 
@@ -809,7 +815,7 @@ if [[ -z "$BOBNET_ROOT" ]]; then
 fi
 
 export BOBNET_ROOT
-export AGENTS_SCHEMA="$BOBNET_ROOT/config/agents-schema.v3.json"
+export AGENTS_SCHEMA="$BOBNET_ROOT/config/agents-schema.json"
 source "$HOME/.local/lib/bobnet/agents.sh"
 source "$HOME/.local/lib/bobnet/bobnet.sh"
 bobnet_main "$@"
