@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.6"
+BOBNET_CLI_VERSION="3.9.7"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -1049,30 +1049,30 @@ case "${1:-help}" in
             echo "  --force, -f    Use gh API instead of curl (bypasses CDN cache)"
             exit 0
         fi
-        local use_gh=false
-        [[ "${2:-}" == "--force" || "${2:-}" == "-f" ]] && use_gh=true
+        _use_gh=false
+        [[ "${2:-}" == "--force" || "${2:-}" == "-f" ]] && _use_gh=true
         
         echo "Checking for updates..."
-        local current=$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")
-        local remote=""
+        _current=$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")
+        _remote=""
         
-        if [[ "$use_gh" == "true" ]]; then
+        if [[ "$_use_gh" == "true" ]]; then
             command -v gh &>/dev/null || { echo "gh CLI not found" >&2; exit 1; }
-            remote=$(gh api repos/buildzero-tech/bobnet-cli/contents/install.sh --jq '.content' 2>/dev/null | base64 -d | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
+            _remote=$(gh api repos/buildzero-tech/bobnet-cli/contents/install.sh --jq '.content' 2>/dev/null | base64 -d | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
         else
-            remote=$(curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" 2>/dev/null | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
+            _remote=$(curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" 2>/dev/null | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
         fi
         
-        if [[ -z "$remote" ]]; then
+        if [[ -z "$_remote" ]]; then
             echo "Could not fetch remote version" >&2
             exit 1
         fi
-        if [[ "$current" == "$remote" && "$use_gh" != "true" ]]; then
-            echo "Already at v$current"
+        if [[ "$_current" == "$_remote" && "$_use_gh" != "true" ]]; then
+            echo "Already at v$_current"
             exit 0
         fi
-        echo "Updating v$current → v$remote..."
-        if [[ "$use_gh" == "true" ]]; then
+        echo "Updating v$_current → v$_remote..."
+        if [[ "$_use_gh" == "true" ]]; then
             gh api repos/buildzero-tech/bobnet-cli/contents/install.sh --jq '.content' | base64 -d | bash -s -- --update
         else
             curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash -s -- --update
