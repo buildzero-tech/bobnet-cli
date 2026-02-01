@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.4"
+BOBNET_CLI_VERSION="4.0.5"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -254,6 +254,8 @@ EOF
             if [[ -e "$dest" ]]; then
                 warn "~/$repo_name already exists, keeping in ~/.bobnet/"
             else
+                # cd out if we're inside the repo being moved
+                [[ "$PWD" == "$BOBNET_ROOT"* ]] && cd ~
                 mv "$BOBNET_ROOT" "$dest"
                 success "moved repo to ~/$repo_name"
                 # Clean up .bobnet if empty
@@ -261,6 +263,8 @@ EOF
             fi
             ;;
         delete)
+            # cd out if we're inside the repo being deleted
+            [[ "$PWD" == "$BOBNET_ROOT"* ]] && cd ~
             rm -rf "$BOBNET_ROOT"
             success "deleted $BOBNET_ROOT"
             rmdir ~/.bobnet 2>/dev/null && success "removed empty ~/.bobnet/"
