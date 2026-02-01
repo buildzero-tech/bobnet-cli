@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.3.0"
+BOBNET_CLI_VERSION="3.4.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -205,6 +205,76 @@ cmd_eject() {
     success "Eject complete — run '$claw gateway restart'"
 }
 
+cmd_agent() {
+    local subcmd="${1:-list}"; shift 2>/dev/null || true
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
+    
+    case "$subcmd" in
+        list|ls)
+            echo "=== BobNet Agents ==="
+            for agent in $(get_all_agents); do
+                local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+                local ws=$(get_workspace "$agent")
+                local ad=$(get_agent_dir "$agent")
+                local ws_ok="✓"; [[ -d "$ws" ]] || ws_ok="✗"
+                local ad_ok="✓"; [[ -d "$ad" ]] || ad_ok="✗"
+                echo "  $id  workspace:$ws_ok  agents:$ad_ok"
+            done
+            ;;
+        add)
+            local name="${1:-}"
+            [[ -z "$name" ]] && error "Usage: bobnet agent add <name>"
+            
+            # Check agent in schema
+            local schema_name="$name"; [[ "$name" == "main" ]] && schema_name="bob"
+            if ! jq -e --arg a "$schema_name" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+                error "Agent '$name' not in schema. Add to agents-schema.v3.json first."
+            fi
+            
+            local ws=$(get_workspace "$schema_name")
+            local ad=$(get_agent_dir "$schema_name")
+            
+            # Create directories
+            if [[ ! -d "$ws" ]]; then
+                mkdir -p "$ws"
+                success "Created $ws"
+            else
+                echo "  Workspace exists: $ws"
+            fi
+            
+            if [[ ! -d "$ad" ]]; then
+                mkdir -p "$ad"
+                success "Created $ad"
+            else
+                echo "  Agent dir exists: $ad"
+            fi
+            
+            # Call openclaw agents add
+            if [[ -n "$claw" ]]; then
+                $claw agents add "$name" --workspace "$ws" --agent-dir "$ad" --non-interactive
+                success "Added to OpenClaw"
+            else
+                warn "OpenClaw not found, skipping config update"
+                echo "  Run 'bobnet install' to sync config"
+            fi
+            ;;
+        -h|--help|help)
+            cat <<'EOF'
+Usage: bobnet agent <command>
+
+Commands:
+  list              List agents and directory status
+  add <name>        Add agent (create dirs, register with OpenClaw)
+
+Examples:
+  bobnet agent list
+  bobnet agent add family
+EOF
+            ;;
+        *) error "Unknown agent command: $subcmd" ;;
+    esac
+}
+
 cmd_scope() {
     local subcmd="${1:-list}"; shift 2>/dev/null || true
     case "$subcmd" in
@@ -355,34 +425,30 @@ cmd_validate() {
         warn "OpenClaw not found, skipping config checks"
     fi
     
-    # 3. Workspaces exist
-    local ws_missing=""
+    # 3 & 4. Agent directories exist (workspace + agents)
+    local agents_incomplete=""
     for agent in $(get_all_agents); do
-        [[ -d "$(get_workspace "$agent")" ]] || ws_missing="$ws_missing $agent"
+        local ws=$(get_workspace "$agent")
+        local ad=$(get_agent_dir "$agent")
+        if [[ ! -d "$ws" || ! -d "$ad" ]]; then
+            agents_incomplete="$agents_incomplete $agent"
+        fi
     done
-    if [[ -z "$ws_missing" ]]; then
-        success "Workspaces exist ($(get_all_agents | wc -w | tr -d ' '))"
+    if [[ -z "$agents_incomplete" ]]; then
+        success "Agent directories exist ($(get_all_agents | wc -w | tr -d ' '))"
     else
-        echo -e "${RED}✗${NC} Missing workspaces:$ws_missing"
-        for agent in $ws_missing; do
-            echo "    mkdir -p $(get_workspace "$agent")"
+        echo -e "${RED}✗${NC} Missing directories for:$agents_incomplete"
+        for agent in $agents_incomplete; do
+            local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+            echo ""
+            read -p "    Add agent '$id'? [Y/n] " -n 1 -r; echo ""
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                cmd_agent add "$id"
+            else
+                echo "    Skipped. Run manually: bobnet agent add $id"
+                ((failures++))
+            fi
         done
-        ((failures++))
-    fi
-    
-    # 4. Agent dirs exist
-    local ad_missing=""
-    for agent in $(get_all_agents); do
-        [[ -d "$(get_agent_dir "$agent")" ]] || ad_missing="$ad_missing $agent"
-    done
-    if [[ -z "$ad_missing" ]]; then
-        success "Agent dirs exist ($(get_all_agents | wc -w | tr -d ' '))"
-    else
-        echo -e "${RED}✗${NC} Missing agent dirs:$ad_missing"
-        for agent in $ad_missing; do
-            echo "    mkdir -p $(get_agent_dir "$agent")"
-        done
-        ((failures++))
     fi
     
     # 5. Binding agents valid
@@ -467,6 +533,7 @@ COMMANDS:
   uninstall           Remove BobNet config from OpenClaw
   eject               Migrate agents to standard OpenClaw structure
   validate            Validate BobNet configuration
+  agent [cmd]         Manage agents (list, add)
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
   signal [cmd]        Signal backup/restore
@@ -485,6 +552,7 @@ bobnet_main() {
         uninstall) shift; cmd_uninstall "$@" ;;
         eject) shift; cmd_eject "$@" ;;
         validate) cmd_validate ;;
+        agent) shift; cmd_agent "$@" ;;
         scope) shift; cmd_scope "$@" ;;
         binding) shift; cmd_binding "$@" ;;
         signal) shift; cmd_signal "$@" ;;
