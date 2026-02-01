@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.7"
+BOBNET_CLI_VERSION="4.0.8"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -68,15 +68,28 @@ get_agent_dir() { echo "$BOBNET_ROOT/agents/$1"; }
 get_all_scopes() { jq -r '.scopes | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""; }
 agent_exists() { [[ -d "$(get_workspace "$1")" ]]; }
 validate_agent() { agent_exists "$1" || { echo "Agent '$1' not found" >&2; return 1; }; }
+is_agent_default() { [[ $(jq -r --arg a "$1" '.agents[$a].default // false' "$AGENTS_SCHEMA" 2>/dev/null) == "true" ]]; }
+is_agent_reserved() { [[ $(jq -r --arg a "$1" '.agents[$a].reserved // false' "$AGENTS_SCHEMA" 2>/dev/null) == "true" ]]; }
+get_reserved_agents() { jq -r '.agents | to_entries[] | select(.value.reserved == true) | .key' "$AGENTS_SCHEMA" 2>/dev/null; }
 print_agent_summary() {
     echo "BobNet Agents"; echo "============="
     for scope in $(get_all_scopes); do
         echo "[$scope]"
         for agent in $(get_agents_by_scope "$scope"); do
             local e="✓"; [[ -d "$(get_workspace "$agent")" ]] || e="✗"
-            echo "  $agent $e"
+            local d=""; is_agent_default "$agent" && d=" (default)"
+            echo "  $agent $e$d"
         done
     done
+    # Show reserved agents separately
+    local reserved=$(get_reserved_agents)
+    if [[ -n "$reserved" ]]; then
+        echo "[reserved]"
+        for agent in $reserved; do
+            local e="✓"; [[ -d "$(get_workspace "$agent")" ]] || e="✗"
+            echo "  $agent $e"
+        done
+    fi
 }
 AGENTS_SH
 
