@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.2.2"
+BOBNET_CLI_VERSION="3.3.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -125,6 +125,8 @@ cmd_install() {
     
     echo ""; success "BobNet installed"
     echo "  Run '$claw gateway restart' to apply"
+    echo ""
+    cmd_validate
 }
 
 cmd_uninstall() {
@@ -157,6 +159,12 @@ cmd_uninstall() {
     [[ "$remove_repo" == "true" ]] && rm -rf "$BOBNET_ROOT" && success "removed $BOBNET_ROOT"
     [[ "$remove_cli" == "true" ]] && rm -f ~/.local/bin/bobnet && rm -rf ~/.local/lib/bobnet && success "removed CLI"
     success "BobNet uninstalled"
+    
+    # Validate if repo and cli still exist
+    if [[ "$remove_repo" == "false" && "$remove_cli" == "false" ]]; then
+        echo ""
+        cmd_validate
+    fi
 }
 
 cmd_eject() {
@@ -308,6 +316,144 @@ cmd_update() {
     fi
 }
 
+cmd_validate() {
+    local failures=0
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
+    
+    echo "=== BobNet Validate ==="
+    echo ""
+    
+    # 1. Schema agents in config
+    if [[ -n "$claw" ]]; then
+        local config_agents=$($claw config get agents.list 2>/dev/null | jq -r '.[].id' | sort)
+        local schema_agents=$(get_all_agents | while read a; do [[ "$a" == "bob" ]] && echo "main" || echo "$a"; done | sort)
+        local missing=""
+        for agent in $schema_agents; do
+            echo "$config_agents" | grep -q "^${agent}$" || missing="$missing $agent"
+        done
+        if [[ -z "$missing" ]]; then
+            success "Schema agents in config ($(echo "$schema_agents" | wc -w | tr -d ' '))"
+        else
+            echo -e "${RED}✗${NC} Schema agents missing from config:$missing"
+            echo "    bobnet install"
+            ((failures++))
+        fi
+        
+        # 2. No orphan agents in config
+        local orphans=""
+        for agent in $config_agents; do
+            echo "$schema_agents" | grep -q "^${agent}$" || orphans="$orphans $agent"
+        done
+        if [[ -z "$orphans" ]]; then
+            success "No orphan agents in config"
+        else
+            echo -e "${RED}✗${NC} Orphan agents in config:$orphans"
+            echo "    bobnet install"
+            ((failures++))
+        fi
+    else
+        warn "OpenClaw not found, skipping config checks"
+    fi
+    
+    # 3. Workspaces exist
+    local ws_missing=""
+    for agent in $(get_all_agents); do
+        [[ -d "$(get_workspace "$agent")" ]] || ws_missing="$ws_missing $agent"
+    done
+    if [[ -z "$ws_missing" ]]; then
+        success "Workspaces exist ($(get_all_agents | wc -w | tr -d ' '))"
+    else
+        echo -e "${RED}✗${NC} Missing workspaces:$ws_missing"
+        for agent in $ws_missing; do
+            echo "    mkdir -p $(get_workspace "$agent")"
+        done
+        ((failures++))
+    fi
+    
+    # 4. Agent dirs exist
+    local ad_missing=""
+    for agent in $(get_all_agents); do
+        [[ -d "$(get_agent_dir "$agent")" ]] || ad_missing="$ad_missing $agent"
+    done
+    if [[ -z "$ad_missing" ]]; then
+        success "Agent dirs exist ($(get_all_agents | wc -w | tr -d ' '))"
+    else
+        echo -e "${RED}✗${NC} Missing agent dirs:$ad_missing"
+        for agent in $ad_missing; do
+            echo "    mkdir -p $(get_agent_dir "$agent")"
+        done
+        ((failures++))
+    fi
+    
+    # 5. Binding agents valid
+    local binding_agents=$(jq -r '.bindings[].agentId' "$AGENTS_SCHEMA" 2>/dev/null)
+    local schema_agents_raw=$(get_all_agents)
+    local invalid_bindings=""
+    for agent in $binding_agents; do
+        local found=false
+        for sa in $schema_agents_raw; do
+            [[ "$sa" == "$agent" ]] && found=true && break
+        done
+        [[ "$found" == "false" ]] && invalid_bindings="$invalid_bindings $agent"
+    done
+    if [[ -z "$invalid_bindings" ]]; then
+        local bc=$(echo "$binding_agents" | wc -w | tr -d ' ')
+        success "Bindings valid ($bc)"
+    else
+        echo -e "${RED}✗${NC} Bindings reference unknown agents:$invalid_bindings"
+        for agent in $invalid_bindings; do
+            echo "    bobnet binding remove $agent"
+        done
+        ((failures++))
+    fi
+    
+    # 6. Bindings in sync
+    if [[ -n "$claw" ]]; then
+        local schema_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+        local config_count=$($claw config get bindings 2>/dev/null | jq 'length' || echo 0)
+        if [[ "$schema_count" == "$config_count" ]]; then
+            success "Bindings in sync ($schema_count)"
+        else
+            echo -e "${RED}✗${NC} Bindings out of sync (schema: $schema_count, config: $config_count)"
+            echo "    bobnet binding sync"
+            ((failures++))
+        fi
+    fi
+    
+    # 7. git-crypt unlocked
+    if command -v git-crypt &>/dev/null && [[ -d "$BOBNET_ROOT/.git" ]]; then
+        if (cd "$BOBNET_ROOT" && git-crypt status &>/dev/null); then
+            success "git-crypt unlocked"
+        else
+            echo -e "${RED}✗${NC} Repo is locked"
+            echo "    bobnet unlock"
+            ((failures++))
+        fi
+    else
+        success "git-crypt not applicable"
+    fi
+    
+    # 8. OpenClaw reachable
+    if [[ -n "$claw" ]]; then
+        if $claw gateway call config.get &>/dev/null; then
+            success "OpenClaw reachable"
+        else
+            echo -e "${RED}✗${NC} OpenClaw gateway not running"
+            echo "    openclaw gateway start"
+            ((failures++))
+        fi
+    fi
+    
+    echo ""
+    if [[ $failures -eq 0 ]]; then
+        success "All checks passed"
+        return 0
+    else
+        echo -e "${RED}$failures check(s) failed${NC}"
+        return 1
+    fi
+}
+
 cmd_help() {
     cat <<EOF
 BobNet CLI v$BOBNET_CLI_VERSION
@@ -320,6 +466,7 @@ COMMANDS:
   install             Configure OpenClaw with BobNet agents
   uninstall           Remove BobNet config from OpenClaw
   eject               Migrate agents to standard OpenClaw structure
+  validate            Validate BobNet configuration
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
   signal [cmd]        Signal backup/restore
@@ -337,6 +484,7 @@ bobnet_main() {
         install|setup) shift; cmd_install "$@" ;;
         uninstall) shift; cmd_uninstall "$@" ;;
         eject) shift; cmd_eject "$@" ;;
+        validate) cmd_validate ;;
         scope) shift; cmd_scope "$@" ;;
         binding) shift; cmd_binding "$@" ;;
         signal) shift; cmd_signal "$@" ;;
