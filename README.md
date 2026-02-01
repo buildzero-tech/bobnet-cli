@@ -5,11 +5,7 @@ Multi-agent orchestration framework for OpenClaw/Clawdbot.
 ## Install
 
 ```bash
-# New repo
-curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet/main/install.sh | bash
-
-# Clone existing
-curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet/main/install.sh | bash -s -- --clone git@github.com:you/your-bobnet.git
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash -s -- --clone git@github.com:you/your-ultima-thule.git
 ```
 
 ## What it does
