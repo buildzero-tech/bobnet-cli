@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.8"
+BOBNET_CLI_VERSION="3.9.9"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -363,6 +363,40 @@ cmd_agent() {
                 success "Symlinked AGENTS.md → core/AGENTS.md"
             fi
             ;;
+        default)
+            local name="${1:-}"
+            [[ -z "$name" ]] && error "Usage: bobnet agent default <name>"
+            
+            # Normalize name
+            local schema_name="$name"; [[ "$name" == "main" ]] && schema_name="bob"
+            
+            # Check agent exists in schema
+            if ! jq -e --arg a "$schema_name" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+                error "Agent '$name' not in schema"
+            fi
+            
+            # Update schema: clear all defaults, set this one
+            jq --arg a "$schema_name" '
+                .agents |= with_entries(
+                    if .key == $a then .value.default = true
+                    else .value |= del(.default)
+                    end
+                )
+            ' "$AGENTS_SCHEMA" > "${AGENTS_SCHEMA}.tmp" && mv "${AGENTS_SCHEMA}.tmp" "$AGENTS_SCHEMA"
+            success "schema: $name is now default"
+            
+            # Apply to live config
+            if [[ -n "$claw" ]]; then
+                # Get current list, update default flags
+                local list=$($claw config get agents.list 2>/dev/null)
+                local new_list=$(echo "$list" | jq --arg id "$name" '
+                    map(if .id == $id then .default = true else del(.default) end)
+                ')
+                $claw config set agents.list "$new_list" --json
+                success "config: $name is now default"
+                echo "  Run 'openclaw gateway restart' to apply"
+            fi
+            ;;
         -h|--help|help)
             cat <<'EOF'
 Usage: bobnet agent <command>
@@ -370,9 +404,11 @@ Usage: bobnet agent <command>
 Commands:
   list              List agents and directory status
   add <name>        Add agent (create dirs, register with OpenClaw)
+  default <name>    Set default agent for unbound messages
 
 Examples:
   bobnet agent list
+  bobnet agent default main
   bobnet agent add family
 EOF
             ;;
