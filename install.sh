@@ -236,7 +236,8 @@ EOF
         ;;
 esac
 
-[[ -f "$INSTALL_DIR/scripts/bobnet" ]] || extract_scripts "$INSTALL_DIR"
+# Always extract latest scripts
+extract_scripts "$INSTALL_DIR"
 
 #######################################
 # Install to PATH
