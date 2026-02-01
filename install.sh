@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.2.1"
+BOBNET_CLI_VERSION="3.2.2"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -149,7 +149,7 @@ cmd_uninstall() {
         cp "${config}.pre-bobnet" "$config"; success "restored config backup"
     else
         $claw config set agents.list '[]' --json
-        $claw config set agents.defaults.workspace '' 
+        $claw config set agents.defaults.workspace "$HOME/.openclaw/workspace/"
         $claw config set bindings '[]' --json
         success "cleared config"
     fi
