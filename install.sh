@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.6.2"
+BOBNET_CLI_VERSION="3.7.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -736,12 +736,63 @@ case "${1:-help}" in
         if [[ -z "$BOBNET_ROOT" ]]; then
             echo "No BobNet repository found."
             echo ""
-            echo "To set up BobNet, run the installer:"
-            echo "  curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash"
-            echo ""
-            echo "To clone an existing repo:"
-            echo "  curl -fsSL .../install.sh | bash -s -- --clone <URL>"
-            exit 1
+            
+            # Check for existing ultima-thule repos on GitHub
+            repos=()
+            if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+                while IFS= read -r repo; do
+                    [[ -n "$repo" ]] && repos+=("$repo")
+                done < <(gh repo list --limit 100 --json nameWithOwner,name -q '.[] | select(.name == "ultima-thule") | .nameWithOwner' 2>/dev/null)
+                
+                # Also check orgs user has access to
+                while IFS= read -r org; do
+                    if gh repo view "$org/ultima-thule" &>/dev/null 2>&1; then
+                        [[ ! " ${repos[*]} " =~ " $org/ultima-thule " ]] && repos+=("$org/ultima-thule")
+                    fi
+                done < <(gh org list 2>/dev/null || true)
+            fi
+            
+            if [[ ${#repos[@]} -gt 0 ]]; then
+                echo "Found ultima-thule repo(s) on GitHub:"
+                for i in "${!repos[@]}"; do
+                    echo "  [$((i+1))] ${repos[$i]}"
+                done
+                echo "  [N] Create new repository"
+                echo "  [Q] Quit"
+                echo ""
+                read -rp "Choice: " choice
+                case "$choice" in
+                    [0-9]*)
+                        idx=$((choice - 1))
+                        if [[ $idx -ge 0 && $idx -lt ${#repos[@]} ]]; then
+                            repo="${repos[$idx]}"
+                            echo "Cloning $repo..."
+                            exec curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash -s -- --clone "https://github.com/$repo.git"
+                        else
+                            echo "Invalid choice" >&2; exit 1
+                        fi ;;
+                    [Nn])
+                        exec curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash ;;
+                    [Qq]) exit 0 ;;
+                    *) echo "Invalid choice" >&2; exit 1 ;;
+                esac
+            else
+                echo "What would you like to do?"
+                echo "  [N] Create new repository"
+                echo "  [C] Clone existing (enter URL)"
+                echo "  [Q] Quit"
+                echo ""
+                read -rp "Choice [N/c/q]: " choice
+                case "$choice" in
+                    [Cc])
+                        read -rp "Repository URL: " url
+                        [[ -z "$url" ]] && { echo "No URL provided" >&2; exit 1; }
+                        exec curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash -s -- --clone "$url" ;;
+                    [Qq]) exit 0 ;;
+                    *)
+                        exec curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash ;;
+                esac
+            fi
         fi ;;
 esac
 
