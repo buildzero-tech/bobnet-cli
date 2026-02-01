@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.0"
+BOBNET_CLI_VERSION="3.9.1"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -506,20 +506,22 @@ EOF
 }
 
 cmd_sync() {
-    local force=false dry_run=false
+    local force=false dry_run=false yes=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --force) force=true; shift ;;
+            --force|-f) force=true; shift ;;
             --dry-run) dry_run=true; shift ;;
+            --yes|-y) yes=true; shift ;;
             -h|--help)
                 cat <<'EOF'
-Usage: bobnet sync [--force] [--dry-run]
+Usage: bobnet sync [--dry-run] [--yes] [--force]
 
 Sync schema config into OpenClaw (agents, channels, bindings).
 
 OPTIONS:
   --dry-run    Show what would change without applying
-  --force      Replace instead of merge (strict mode)
+  --yes, -y    Skip confirmation prompt
+  --force, -f  Replace channels instead of merge (strict mode)
 
 BEHAVIOR:
   Default: Merge - only overwrites fields defined in schema
@@ -536,9 +538,9 @@ EOF
     echo "=== BobNet Sync ==="
     echo ""
     
-    local changes=0
+    local changes=()
     
-    # 1. Sync agents
+    # 1. Check agents
     echo "--- Agents ---"
     local schema_agents=$(get_all_agents | while read a; do [[ "$a" == "bob" ]] && echo "main" || echo "$a"; done | sort)
     local config_agents=$($claw config get agents.list 2>/dev/null | jq -r '.[].id' 2>/dev/null | sort)
@@ -555,37 +557,43 @@ EOF
     if [[ -z "$missing" && -z "$extra" ]]; then
         success "Agents in sync"
     else
-        [[ -n "$missing" ]] && echo "  Missing:$missing"
-        [[ -n "$extra" ]] && echo "  Extra:$extra"
-        ((changes++))
+        if [[ -n "$missing" ]]; then
+            echo "  Add:$missing"
+            changes+=("agents: add$missing")
+        fi
+        if [[ -n "$extra" ]]; then
+            echo "  Remove:$extra"
+            changes+=("agents: remove$extra")
+        fi
     fi
     
-    # 2. Sync channels
+    # 2. Check channels
     echo ""
     echo "--- Channels ---"
     for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
         local schema_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
         local live_config=$($claw config get "channels.$channel" 2>/dev/null | jq -c '.' 2>/dev/null || echo '{}')
         
-        # Compare key fields from schema
-        local drift=""
+        local drift_keys=""
         for key in $(echo "$schema_config" | jq -r 'keys[]'); do
             local schema_val=$(echo "$schema_config" | jq -c ".$key")
             local live_val=$(echo "$live_config" | jq -c ".$key // null")
             if [[ "$schema_val" != "$live_val" ]]; then
-                drift="$drift $key"
+                drift_keys="$drift_keys $key"
+                echo "  $channel.$key:"
+                echo "    schema: $schema_val"
+                echo "    live:   $live_val"
             fi
         done
         
-        if [[ -z "$drift" ]]; then
+        if [[ -z "$drift_keys" ]]; then
             success "$channel in sync"
         else
-            echo "  $channel drift:$drift"
-            ((changes++))
+            changes+=("$channel:$drift_keys")
         fi
     done
     
-    # 3. Sync bindings
+    # 3. Check bindings
     echo ""
     echo "--- Bindings ---"
     local schema_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
@@ -594,25 +602,41 @@ EOF
     if [[ "$schema_count" == "$config_count" ]]; then
         success "Bindings in sync ($schema_count)"
     else
-        echo "  Schema: $schema_count, Config: $config_count"
-        ((changes++))
+        echo "  Schema: $schema_count bindings"
+        echo "  Live:   $config_count bindings"
+        changes+=("bindings: $schema_count (schema) vs $config_count (live)")
     fi
     
     echo ""
     
-    # Apply if needed
-    if [[ $changes -eq 0 ]]; then
+    # Summary
+    if [[ ${#changes[@]} -eq 0 ]]; then
         success "Everything in sync"
         return 0
     fi
     
+    echo "=== Changes Detected ==="
+    for change in "${changes[@]}"; do
+        echo "  • $change"
+    done
+    echo ""
+    
     if [[ "$dry_run" == "true" ]]; then
-        echo "Dry run - $changes item(s) would be updated"
+        echo "Dry run complete - no changes applied"
         return 0
     fi
     
-    echo "Applying $changes change(s)..."
+    # Confirmation
+    if [[ "$yes" != "true" ]]; then
+        local mode="merge"
+        [[ "$force" == "true" ]] && mode="replace"
+        read -p "Apply ${#changes[@]} change(s) in $mode mode? [y/N] " -n 1 -r
+        echo ""
+        [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled"; return 0; }
+    fi
+    
     echo ""
+    echo "Applying changes..."
     
     # Rebuild agents list
     local list='[' first=true
@@ -628,10 +652,8 @@ EOF
     for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
         local schema_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
         if [[ "$force" == "true" ]]; then
-            # Replace mode
             $claw config set "channels.$channel" "$schema_config" --json && success "$channel replaced"
         else
-            # Merge mode - apply each key individually
             for key in $(echo "$schema_config" | jq -r 'keys[]'); do
                 local val=$(echo "$schema_config" | jq -c ".$key")
                 $claw config set "channels.$channel.$key" "$val" --json 2>/dev/null
