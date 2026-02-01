@@ -138,19 +138,25 @@ cmd_status() {
 }
 cmd_setup() {
     echo "Configuring OpenClaw..."
-    local agents='['; local first=true
+    local claw=""
+    command -v openclaw &>/dev/null && claw="openclaw"
+    command -v clawdbot &>/dev/null && claw="clawdbot"
+    [[ -z "$claw" ]] && { echo "openclaw/clawdbot not found" >&2; exit 1; }
+    
+    # Set default workspace
+    $claw config set agents.defaults.workspace "$(get_workspace bob)"
+    
+    # Set each agent
+    local i=0
     for agent in $(get_all_agents); do
-        $first || agents+=','
-        first=false
         local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
-        agents+="{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\"}"
+        $claw config set "agents.list[$i].id" "$id"
+        $claw config set "agents.list[$i].workspace" "$(get_workspace "$agent")"
+        $claw config set "agents.list[$i].agentDir" "$(get_agent_dir "$agent")"
+        ((i++))
     done
-    agents+=']'
-    local patch="{\"agents\":{\"defaults\":{\"workspace\":\"$(get_workspace bob)\"},\"list\":$agents}}"
-    if command -v openclaw &>/dev/null; then openclaw gateway config.patch "$patch"
-    elif command -v clawdbot &>/dev/null; then clawdbot gateway config.patch "$patch"
-    else echo "openclaw/clawdbot not found" >&2; exit 1; fi
-    echo "Done ✓"
+    
+    echo "Done ✓ (restart gateway to apply)"
 }
 cmd_unlock() {
     local key="${1:-$HOME/.secrets/bobnet-vault.key}"
