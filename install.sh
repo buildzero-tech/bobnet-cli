@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.4"
+BOBNET_CLI_VERSION="3.9.5"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -1046,6 +1046,18 @@ case "${1:-help}" in
             echo "Update bobnet CLI to the latest version from GitHub."
             exit 0
         fi
+        echo "Checking for updates..."
+        local current=$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")
+        local remote=$(curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" 2>/dev/null | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
+        if [[ -z "$remote" ]]; then
+            echo "Could not fetch remote version" >&2
+            exit 1
+        fi
+        if [[ "$current" == "$remote" ]]; then
+            echo "Already at v$current"
+            exit 0
+        fi
+        echo "Updating v$current → v$remote..."
         curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash -s -- --update
         exit 0 ;;
     install|setup)
