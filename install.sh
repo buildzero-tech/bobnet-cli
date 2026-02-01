@@ -146,24 +146,31 @@ cmd_status() {
 }
 cmd_setup() {
     echo "Configuring OpenClaw..."
-    local claw=""
-    command -v clawdbot &>/dev/null && claw="clawdbot"
-    command -v openclaw &>/dev/null && claw="openclaw"  # prefer openclaw
-    [[ -z "$claw" ]] && { echo "openclaw/clawdbot not found" >&2; exit 1; }
     
-    # Set default workspace
-    $claw config set agents.defaults.workspace "$(get_workspace bob)"
+    # Find config file
+    local config=""
+    [[ -f "$HOME/.openclaw/openclaw.json" ]] && config="$HOME/.openclaw/openclaw.json"
+    [[ -f "$HOME/.clawdbot/clawdbot.json" ]] && config="$HOME/.clawdbot/clawdbot.json"
+    [[ -z "$config" ]] && { echo "Config not found" >&2; exit 1; }
     
-    # Set each agent
-    local i=0
+    # Build agents list JSON
+    local agents='[]'
     for agent in $(get_all_agents); do
         local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
-        $claw config set "agents.list[$i].id" "$id"
-        $claw config set "agents.list[$i].workspace" "$(get_workspace "$agent")"
-        $claw config set "agents.list[$i].agentDir" "$(get_agent_dir "$agent")"
-        ((i++))
+        agents=$(echo "$agents" | jq --arg id "$id" \
+            --arg ws "$(get_workspace "$agent")" \
+            --arg ad "$(get_agent_dir "$agent")" \
+            '. + [{"id": $id, "workspace": $ws, "agentDir": $ad}]')
     done
     
+    # Update config file
+    local tmp=$(mktemp)
+    jq --arg ws "$(get_workspace bob)" --argjson list "$agents" \
+        '.agents.defaults.workspace = $ws | .agents.list = $list' \
+        "$config" > "$tmp" && mv "$tmp" "$config"
+    
+    echo "  Updated: $config"
+    echo "  Agents: $(echo "$agents" | jq length)"
     echo "Done ✓ (restart gateway to apply)"
 }
 cmd_unlock() {
