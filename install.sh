@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.4.2"
+BOBNET_CLI_VERSION="3.4.3"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -249,10 +249,14 @@ cmd_agent() {
                 echo "  Agent dir exists: $ad"
             fi
             
-            # Call openclaw agents add
+            # Call openclaw agents add (if not already registered)
             if [[ -n "$claw" ]]; then
-                $claw agents add "$name" --workspace "$ws" --agent-dir "$ad" --non-interactive
-                success "Added to OpenClaw"
+                if $claw agents list --json 2>/dev/null | jq -e --arg n "$name" '.[] | select(.id == $n)' >/dev/null 2>&1; then
+                    echo "  Agent already in OpenClaw config"
+                else
+                    $claw agents add "$name" --workspace "$ws" --agent-dir "$ad" --non-interactive
+                    success "Added to OpenClaw"
+                fi
             else
                 warn "OpenClaw not found, skipping config update"
                 echo "  Run 'bobnet install' to sync config"
