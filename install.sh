@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.8"
+BOBNET_CLI_VERSION="4.0.9"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -184,6 +184,11 @@ EOF
         echo "Migrating main agent to BobNet structure..."
         mkdir -p "$(dirname "$bn_main_ws")"
         mv "$oc_main_ws" "$bn_main_ws" && success "workspace: $oc_main_ws → $bn_main_ws"
+        # Remove nested .git if present (OpenClaw sometimes creates one)
+        if [[ -d "$bn_main_ws/.git" ]]; then
+            rm -rf "$bn_main_ws/.git"
+            success "removed nested .git from workspace/main"
+        fi
     fi
     
     # Migrate agent dir
