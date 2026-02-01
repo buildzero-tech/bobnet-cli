@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.3"
+BOBNET_CLI_VERSION="4.0.4"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -215,7 +215,7 @@ EOF
     [[ -z "$claw" ]] && error "$CLI_NAME not found"
     local config="$CONFIG_DIR/$CONFIG_NAME"
     
-    [[ "$force" == "false" ]] && { echo "This will clear BobNet from $CLI_NAME config."; read -p "Continue? [y/N] " -n 1 -r; echo ""; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
+    [[ "$force" == "false" ]] && { echo "This will clear BobNet from $CLI_NAME config."; read -p "Continue? [y/N]  " -r; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
     
     if [[ -f "${config}.pre-bobnet" ]]; then
         cp "${config}.pre-bobnet" "$config"; success "restored config backup"
@@ -240,7 +240,7 @@ EOF
         echo "  [M]ove   → Move to ~/$repo_name"
         echo "  [K]eep   → Keep in ~/.bobnet/ (default)"
         echo "  [D]elete → Delete entirely"
-        read -p "Choice [m/K/d]: " -n 1 -r; echo ""
+        read -p "Choice [m/K/d]:  " -r
         case "$REPLY" in
             [Mm]) repo_action="move" ;;
             [Dd]) repo_action="delete" ;;
@@ -300,7 +300,7 @@ cmd_eject() {
     done
     echo ""
     
-    [[ "$force" == "false" ]] && { read -p "Continue? [y/N] " -n 1 -r; echo ""; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
+    [[ "$force" == "false" ]] && { read -p "Continue? [y/N]  " -r; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
     
     mkdir -p "$CONFIG_DIR/agents" "$CONFIG_DIR/workspace"
     local list='[' first=true
@@ -528,7 +528,7 @@ cmd_signal() {
             [[ -z "$file" || ! -f "$file" ]] && error "No backup found"
             [[ -L "$file" ]] && file="$backup_dir/$(readlink "$file")"
             echo "Restoring from $file..."
-            [[ "$force" == "false" ]] && { read -p "Overwrite signal-cli data? [y/N] " -n 1 -r; echo ""; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
+            [[ "$force" == "false" ]] && { read -p "Overwrite signal-cli data? [y/N]  " -r; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
             mkdir -p "$data_dir" && age -d "$file" | tar -C "$data_dir" -xzf - && success "restored" ;;
         list|ls)
             echo "=== Signal Backups ($backup_dir) ==="; [[ ! -d "$backup_dir" ]] && { echo "(none)"; return 0; }
@@ -744,8 +744,7 @@ EOF
     if [[ "$yes" != "true" ]]; then
         local mode="merge"
         [[ "$force" == "true" ]] && mode="replace"
-        read -p "Apply ${#changes[@]} change(s) in $mode mode? [y/N] " -n 1 -r
-        echo ""
+        read -p "Apply ${#changes[@]} change(s) in $mode mode? [y/N] " -r
         [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled"; return 0; }
     fi
     
@@ -940,7 +939,7 @@ cmd_validate() {
             for agent in $agents_incomplete; do
                 local id="$agent"
                 echo ""
-                read -p "    Add agent '$id'? [Y/n] " -n 1 -r; echo ""
+                read -p "    Add agent '$id'? [Y/n]  " -r
                 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
                     cmd_agent add "$id"
                 else
