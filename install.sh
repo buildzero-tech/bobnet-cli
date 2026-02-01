@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.9"
+BOBNET_CLI_VERSION="3.9.10"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -135,14 +135,20 @@ EOF
     # Build agents list with main FIRST (important for default routing)
     local list='[' first=true
     # Add bob/main first
-    list+="{\"id\":\"main\",\"workspace\":\"$(get_workspace bob)\",\"agentDir\":\"$(get_agent_dir bob)\"}"
+    local bob_default=$(jq -r '.agents.bob.default // false' "$AGENTS_SCHEMA")
+    list+="{\"id\":\"main\",\"workspace\":\"$(get_workspace bob)\",\"agentDir\":\"$(get_agent_dir bob)\""
+    [[ "$bob_default" == "true" ]] && list+=",\"default\":true"
+    list+="}"
     first=false
     success "agent: main"
     # Add remaining agents
     for agent in $(get_all_agents); do
         [[ "$agent" == "bob" ]] && continue  # already added as main
         local id="$agent"
-        list+=",{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\"}"
+        local is_default=$(jq -r --arg a "$agent" '.agents[$a].default // false' "$AGENTS_SCHEMA")
+        list+=",{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\""
+        [[ "$is_default" == "true" ]] && list+=",\"default\":true"
+        list+="}"
         success "agent: $id"
     done
     list+=']'
