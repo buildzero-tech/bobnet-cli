@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.5.1"
+BOBNET_CLI_VERSION="3.6.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -130,13 +130,27 @@ cmd_install() {
 }
 
 cmd_uninstall() {
-    local force=false remove_repo=false remove_cli=false
+    local force=false remove_cli=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force) force=true; shift ;;
-            --remove-repo) remove_repo=true; shift ;;
             --cli) remove_cli=true; shift ;;
-            -h|--help) echo "Usage: bobnet uninstall [--force] [--remove-repo] [--cli]"; return 0 ;;
+            -h|--help) 
+                cat <<'EOF'
+Usage: bobnet uninstall [--force] [--cli]
+
+Uninstall BobNet from OpenClaw.
+
+OPTIONS:
+  --force    Skip confirmation prompts
+  --cli      Also remove CLI (~/.local/bin/bobnet, ~/.local/lib/bobnet/)
+
+You will be prompted for what to do with the repo:
+  [M]ove   → Move to ~/<repo-name> (visible, preserved)
+  [K]eep   → Keep in ~/.bobnet/ (hidden, preserved)  
+  [D]elete → Delete entirely (destructive)
+EOF
+                return 0 ;;
             *) shift ;;
         esac
     done
@@ -161,12 +175,50 @@ cmd_uninstall() {
         (cd "$BOBNET_ROOT" && git-crypt lock 2>/dev/null) && success "locked repo"
     fi
     
-    [[ "$remove_repo" == "true" ]] && rm -rf "$BOBNET_ROOT" && success "removed $BOBNET_ROOT"
+    # Ask about repo
+    local repo_action="keep"
+    local repo_name=$(basename "$BOBNET_ROOT")
+    if [[ -d "$BOBNET_ROOT" && "$force" == "false" ]]; then
+        echo ""
+        echo "What to do with the repo ($BOBNET_ROOT)?"
+        echo "  [M]ove   → Move to ~/$repo_name"
+        echo "  [K]eep   → Keep in ~/.bobnet/ (default)"
+        echo "  [D]elete → Delete entirely"
+        read -p "Choice [M/k/d]: " -n 1 -r; echo ""
+        case "$REPLY" in
+            [Mm]) repo_action="move" ;;
+            [Dd]) repo_action="delete" ;;
+            *) repo_action="keep" ;;
+        esac
+    fi
+    
+    case "$repo_action" in
+        move)
+            local dest="$HOME/$repo_name"
+            if [[ -e "$dest" ]]; then
+                warn "~/$repo_name already exists, keeping in ~/.bobnet/"
+            else
+                mv "$BOBNET_ROOT" "$dest"
+                success "moved repo to ~/$repo_name"
+                # Clean up .bobnet if empty
+                rmdir ~/.bobnet 2>/dev/null && success "removed empty ~/.bobnet/"
+            fi
+            ;;
+        delete)
+            rm -rf "$BOBNET_ROOT"
+            success "deleted $BOBNET_ROOT"
+            rmdir ~/.bobnet 2>/dev/null && success "removed empty ~/.bobnet/"
+            ;;
+        keep)
+            echo "  Repo kept at $BOBNET_ROOT"
+            ;;
+    esac
+    
     [[ "$remove_cli" == "true" ]] && rm -f ~/.local/bin/bobnet && rm -rf ~/.local/lib/bobnet && success "removed CLI"
     success "BobNet uninstalled"
     
-    # Validate if repo and cli still exist
-    if [[ "$remove_repo" == "false" && "$remove_cli" == "false" ]]; then
+    # Validate if repo still exists and cli not removed
+    if [[ -d "$BOBNET_ROOT" && "$remove_cli" == "false" ]]; then
         echo ""
         cmd_validate --uninstall
     fi
