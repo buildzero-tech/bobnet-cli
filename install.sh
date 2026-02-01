@@ -67,8 +67,8 @@ fi
 echo "  ✓ jq"
 
 CLAW_CMD=""
-command -v openclaw &>/dev/null && CLAW_CMD="openclaw"
 command -v clawdbot &>/dev/null && CLAW_CMD="clawdbot"
+command -v openclaw &>/dev/null && CLAW_CMD="openclaw"  # prefer openclaw
 [[ -n "$CLAW_CMD" ]] && echo "  ✓ $CLAW_CMD" || echo "  ⚠ openclaw not found (install later)"
 
 # Key check for clone/existing
@@ -139,8 +139,8 @@ cmd_status() {
 cmd_setup() {
     echo "Configuring OpenClaw..."
     local claw=""
-    command -v openclaw &>/dev/null && claw="openclaw"
     command -v clawdbot &>/dev/null && claw="clawdbot"
+    command -v openclaw &>/dev/null && claw="openclaw"  # prefer openclaw
     [[ -z "$claw" ]] && { echo "openclaw/clawdbot not found" >&2; exit 1; }
     
     # Set default workspace
