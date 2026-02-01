@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.5.0"
+BOBNET_CLI_VERSION="3.5.1"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -154,6 +154,11 @@ cmd_uninstall() {
         $claw config set agents.defaults.workspace "$HOME/.openclaw/workspace/"
         $claw config set bindings '[]' --json
         success "cleared config"
+    fi
+    
+    # Lock the repo
+    if command -v git-crypt &>/dev/null && [[ -d "$BOBNET_ROOT/.git" ]]; then
+        (cd "$BOBNET_ROOT" && git-crypt lock 2>/dev/null) && success "locked repo"
     fi
     
     [[ "$remove_repo" == "true" ]] && rm -rf "$BOBNET_ROOT" && success "removed $BOBNET_ROOT"
@@ -466,6 +471,17 @@ cmd_validate() {
             fi
         else
             success "OpenClaw not found (config checks skipped)"
+        fi
+        
+        # 5. git-crypt locked (uninstall mode)
+        if command -v git-crypt &>/dev/null && [[ -d "$BOBNET_ROOT/.git" ]]; then
+            if (cd "$BOBNET_ROOT" && git-crypt status &>/dev/null); then
+                echo -e "${RED}✗${NC} Repo is still unlocked"
+                echo "    bobnet lock"
+                ((failures++))
+            else
+                success "Repo locked"
+            fi
         fi
     else
         # NORMAL MODE: verify install is correct
