@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.8.0"
+BOBNET_CLI_VERSION="3.9.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -438,6 +438,217 @@ cmd_signal() {
     esac
 }
 
+cmd_backup() {
+    local with_signal=false label="manual" push=true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --with-signal) with_signal=true; shift ;;
+            --no-push) push=false; shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet backup [label] [--with-signal] [--no-push]
+
+Backup OpenClaw config and optionally signal-cli data.
+
+OPTIONS:
+  --with-signal    Also backup signal-cli data (encrypted)
+  --no-push        Skip git commit and push
+  label            Reason for backup (default: "manual")
+
+EXAMPLES:
+  bobnet backup                       # Backup config
+  bobnet backup "before migration"    # With label
+  bobnet backup --with-signal         # Include signal data
+EOF
+                return 0 ;;
+            -*) error "Unknown option: $1" ;;
+            *) label="$1"; shift ;;
+        esac
+    done
+    
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
+    [[ -z "$claw" ]] && error "$CLI_NAME not found"
+    
+    local ts=$(date +%Y-%m-%d_%H%M%S)
+    local backup_dir="$BOBNET_ROOT/config/backups"
+    mkdir -p "$backup_dir"
+    
+    # Backup openclaw.json
+    local config="$CONFIG_DIR/$CONFIG_NAME"
+    if [[ -f "$config" ]]; then
+        local backup_file="$backup_dir/${CONFIG_NAME%.json}_${ts}.json"
+        cp "$config" "$backup_file"
+        success "config → $backup_file"
+        # Also update latest symlink
+        ln -sf "$(basename "$backup_file")" "$backup_dir/${CONFIG_NAME%.json}_latest.json"
+    else
+        warn "Config not found: $config"
+    fi
+    
+    # Signal backup
+    if [[ "$with_signal" == "true" ]]; then
+        echo ""
+        cmd_signal backup
+    fi
+    
+    # Commit and push
+    if [[ "$push" == "true" ]]; then
+        echo ""
+        cd "$BOBNET_ROOT"
+        git add -A
+        if git diff --staged --quiet; then
+            echo "No changes to commit"
+        else
+            git commit -m "backup: $label - $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push && success "pushed to remote" || warn "push failed"
+        fi
+    fi
+}
+
+cmd_sync() {
+    local force=false dry_run=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force=true; shift ;;
+            --dry-run) dry_run=true; shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet sync [--force] [--dry-run]
+
+Sync schema config into OpenClaw (agents, channels, bindings).
+
+OPTIONS:
+  --dry-run    Show what would change without applying
+  --force      Replace instead of merge (strict mode)
+
+BEHAVIOR:
+  Default: Merge - only overwrites fields defined in schema
+  Force:   Replace - schema is source of truth, removes extras
+EOF
+                return 0 ;;
+            *) shift ;;
+        esac
+    done
+    
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
+    [[ -z "$claw" ]] && error "$CLI_NAME not found"
+    
+    echo "=== BobNet Sync ==="
+    echo ""
+    
+    local changes=0
+    
+    # 1. Sync agents
+    echo "--- Agents ---"
+    local schema_agents=$(get_all_agents | while read a; do [[ "$a" == "bob" ]] && echo "main" || echo "$a"; done | sort)
+    local config_agents=$($claw config get agents.list 2>/dev/null | jq -r '.[].id' 2>/dev/null | sort)
+    
+    local missing="" extra=""
+    for agent in $schema_agents; do
+        echo "$config_agents" | grep -q "^${agent}$" || missing="$missing $agent"
+    done
+    for agent in $config_agents; do
+        [[ -z "$agent" ]] && continue
+        echo "$schema_agents" | grep -q "^${agent}$" || extra="$extra $agent"
+    done
+    
+    if [[ -z "$missing" && -z "$extra" ]]; then
+        success "Agents in sync"
+    else
+        [[ -n "$missing" ]] && echo "  Missing:$missing"
+        [[ -n "$extra" ]] && echo "  Extra:$extra"
+        ((changes++))
+    fi
+    
+    # 2. Sync channels
+    echo ""
+    echo "--- Channels ---"
+    for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
+        local schema_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
+        local live_config=$($claw config get "channels.$channel" 2>/dev/null | jq -c '.' 2>/dev/null || echo '{}')
+        
+        # Compare key fields from schema
+        local drift=""
+        for key in $(echo "$schema_config" | jq -r 'keys[]'); do
+            local schema_val=$(echo "$schema_config" | jq -c ".$key")
+            local live_val=$(echo "$live_config" | jq -c ".$key // null")
+            if [[ "$schema_val" != "$live_val" ]]; then
+                drift="$drift $key"
+            fi
+        done
+        
+        if [[ -z "$drift" ]]; then
+            success "$channel in sync"
+        else
+            echo "  $channel drift:$drift"
+            ((changes++))
+        fi
+    done
+    
+    # 3. Sync bindings
+    echo ""
+    echo "--- Bindings ---"
+    local schema_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+    local config_count=$($claw config get bindings 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+    
+    if [[ "$schema_count" == "$config_count" ]]; then
+        success "Bindings in sync ($schema_count)"
+    else
+        echo "  Schema: $schema_count, Config: $config_count"
+        ((changes++))
+    fi
+    
+    echo ""
+    
+    # Apply if needed
+    if [[ $changes -eq 0 ]]; then
+        success "Everything in sync"
+        return 0
+    fi
+    
+    if [[ "$dry_run" == "true" ]]; then
+        echo "Dry run - $changes item(s) would be updated"
+        return 0
+    fi
+    
+    echo "Applying $changes change(s)..."
+    echo ""
+    
+    # Rebuild agents list
+    local list='[' first=true
+    for agent in $(get_all_agents); do
+        local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+        $first || list+=','; first=false
+        list+="{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\"}"
+    done
+    list+=']'
+    $claw config set agents.list "$list" --json && success "agents applied"
+    
+    # Apply channels (merge or replace based on --force)
+    for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
+        local schema_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
+        if [[ "$force" == "true" ]]; then
+            # Replace mode
+            $claw config set "channels.$channel" "$schema_config" --json && success "$channel replaced"
+        else
+            # Merge mode - apply each key individually
+            for key in $(echo "$schema_config" | jq -r 'keys[]'); do
+                local val=$(echo "$schema_config" | jq -c ".$key")
+                $claw config set "channels.$channel.$key" "$val" --json 2>/dev/null
+            done
+            success "$channel merged"
+        fi
+    done
+    
+    # Apply bindings
+    local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: "group", id: .groupId}}}]' "$AGENTS_SCHEMA" 2>/dev/null || echo '[]')
+    $claw config set bindings "$bindings" --json && success "bindings applied"
+    
+    echo ""
+    success "Sync complete - restart gateway to apply"
+    echo "  $claw gateway restart"
+}
+
 cmd_unlock() {
     local key="${1:-$HOME/.secrets/bobnet-vault.key}"
     [[ -f "$key" ]] || error "Key not found: $key"
@@ -630,7 +841,30 @@ cmd_validate() {
                 success "Bindings in sync ($schema_count)"
             else
                 echo -e "${RED}✗${NC} Bindings out of sync (schema: $schema_count, config: $config_count)"
-                echo "    bobnet binding sync"
+                echo "    bobnet sync"
+                ((failures++))
+            fi
+        fi
+        
+        # 7. Channel config in sync
+        if [[ -n "$claw" ]]; then
+            local channel_drift=""
+            for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
+                local schema_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
+                local live_config=$($claw config get "channels.$channel" 2>/dev/null | jq -c '.' 2>/dev/null || echo '{}')
+                for key in $(echo "$schema_config" | jq -r 'keys[]'); do
+                    local schema_val=$(echo "$schema_config" | jq -c ".$key")
+                    local live_val=$(echo "$live_config" | jq -c ".$key // null")
+                    if [[ "$schema_val" != "$live_val" ]]; then
+                        channel_drift="$channel_drift $channel.$key"
+                    fi
+                done
+            done
+            if [[ -z "$channel_drift" ]]; then
+                success "Channel config in sync"
+            else
+                echo -e "${RED}✗${NC} Channel config drift:$channel_drift"
+                echo "    bobnet sync"
                 ((failures++))
             fi
         fi
@@ -680,8 +914,10 @@ COMMANDS:
   status              Show agents and repo status
   install             Configure OpenClaw with BobNet agents
   uninstall           Remove BobNet config from OpenClaw
-  eject               Migrate agents to standard OpenClaw structure
   validate            Validate BobNet configuration
+  sync                Sync schema to OpenClaw config
+  backup              Backup OpenClaw config to repo
+  eject               Migrate agents to standard OpenClaw structure
   agent [cmd]         Manage agents (list, add)
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
@@ -701,6 +937,8 @@ bobnet_main() {
         uninstall) shift; cmd_uninstall "$@" ;;
         eject) shift; cmd_eject "$@" ;;
         validate) shift; cmd_validate "$@" ;;
+        sync) shift; cmd_sync "$@" ;;
+        backup) shift; cmd_backup "$@" ;;
         agent) shift; cmd_agent "$@" ;;
         scope) shift; cmd_scope "$@" ;;
         binding) shift; cmd_binding "$@" ;;
