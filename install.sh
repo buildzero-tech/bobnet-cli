@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-log() { $VERBOSE && echo "[DEBUG] $*"; }
+log() { [[ "$VERBOSE" == "true" ]] && echo "[DEBUG] $*" || true; }
 log "INSTALL_DIR=$INSTALL_DIR"
 log "KEY_FILE=$KEY_FILE"
 log "REPO_URL=$REPO_URL"
@@ -287,7 +287,7 @@ if [[ -n "$CLAW_CMD" && "$REPO_MODE" != "new" ]]; then
     log "Running: $INSTALL_DIR/scripts/bobnet setup"
     log "CLAW_CMD=$CLAW_CMD"
     log "Checking bobnet cmd_setup:"
-    $VERBOSE && grep -A5 "cmd_setup()" "$INSTALL_DIR/scripts/bobnet" | head -10
+    [[ "$VERBOSE" == "true" ]] && grep -A5 "cmd_setup()" "$INSTALL_DIR/scripts/bobnet" | head -10 || true
     ./scripts/bobnet setup
 fi
 
