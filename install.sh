@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.7.0"
+BOBNET_CLI_VERSION="3.7.1"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -758,6 +758,7 @@ case "${1:-help}" in
                     echo "  [$((i+1))] ${repos[$i]}"
                 done
                 echo "  [N] Create new repository"
+                echo "  [C] Clone other (enter URL)"
                 echo "  [Q] Quit"
                 echo ""
                 read -rp "Choice: " choice
@@ -773,6 +774,10 @@ case "${1:-help}" in
                         fi ;;
                     [Nn])
                         exec curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash ;;
+                    [Cc])
+                        read -rp "Repository URL: " url
+                        [[ -z "$url" ]] && { echo "No URL provided" >&2; exit 1; }
+                        exec curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash -s -- --clone "$url" ;;
                     [Qq]) exit 0 ;;
                     *) echo "Invalid choice" >&2; exit 1 ;;
                 esac
