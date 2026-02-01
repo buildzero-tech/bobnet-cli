@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.6.1"
+BOBNET_CLI_VERSION="3.6.2"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -713,10 +713,45 @@ BOBNET_SH
     cat > ~/.local/bin/bobnet << 'WRAPPER'
 #!/bin/bash
 set -euo pipefail
+
+# Find BOBNET_ROOT (may not exist)
 if [[ -n "${BOBNET_ROOT:-}" ]]; then :
 elif [[ -f "./config/agents-schema.v3.json" ]]; then BOBNET_ROOT="$(pwd)"
 elif [[ -d "$HOME/.bobnet/ultima-thule" ]]; then BOBNET_ROOT="$HOME/.bobnet/ultima-thule"
-else echo "BOBNET_ROOT not found" >&2; exit 1; fi
+else BOBNET_ROOT=""; fi
+
+# Commands that work without a repo
+case "${1:-help}" in
+    help|--help|-h)
+        source "$HOME/.local/lib/bobnet/bobnet.sh" 2>/dev/null || true
+        cmd_help 2>/dev/null || echo "bobnet - BobNet CLI (run installer to set up repo)"
+        exit 0 ;;
+    --version)
+        echo "bobnet v$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")"
+        exit 0 ;;
+    update)
+        curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash -s -- --update
+        exit 0 ;;
+    install|setup)
+        if [[ -z "$BOBNET_ROOT" ]]; then
+            echo "No BobNet repository found."
+            echo ""
+            echo "To set up BobNet, run the installer:"
+            echo "  curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash"
+            echo ""
+            echo "To clone an existing repo:"
+            echo "  curl -fsSL .../install.sh | bash -s -- --clone <URL>"
+            exit 1
+        fi ;;
+esac
+
+# All other commands require BOBNET_ROOT
+if [[ -z "$BOBNET_ROOT" ]]; then
+    echo "BOBNET_ROOT not found" >&2
+    echo "Run: bobnet help" >&2
+    exit 1
+fi
+
 export BOBNET_ROOT
 export AGENTS_SCHEMA="$BOBNET_ROOT/config/agents-schema.v3.json"
 source "$HOME/.local/lib/bobnet/agents.sh"
