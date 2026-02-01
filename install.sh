@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.4.0"
+BOBNET_CLI_VERSION="3.4.1"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -256,6 +256,14 @@ cmd_agent() {
             else
                 warn "OpenClaw not found, skipping config update"
                 echo "  Run 'bobnet install' to sync config"
+            fi
+            
+            # Apply BobNet customizations based on scope
+            local scope=$(get_agent_scope "$schema_name")
+            if [[ "$scope" == "work" && -f "$ws/AGENTS.md" ]]; then
+                rm "$ws/AGENTS.md"
+                ln -s "../../core/AGENTS.md" "$ws/AGENTS.md"
+                success "Symlinked AGENTS.md → core/AGENTS.md"
             fi
             ;;
         -h|--help|help)
