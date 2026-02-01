@@ -159,13 +159,18 @@ cmd_setup() {
         $first || list+=','
         first=false
         list+="{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\"}"
-        echo "  ✓ $id"
+        echo "  ✓ agent: $id"
     done
     list+=']'
     
-    # Single config update
+    # Build bindings list from schema
+    local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: "group", id: .groupId}}}]' "$AGENTS_SCHEMA" 2>/dev/null || echo '[]')
+    local bind_count=$(echo "$bindings" | jq length)
+    
+    # Apply config
     $claw config set agents.defaults.workspace "$(get_workspace bob)"
     $claw config set agents.list "$list" --json
+    [[ "$bind_count" -gt 0 ]] && $claw config set bindings "$bindings" --json && echo "  ✓ bindings: $bind_count"
     
     echo "Done ✓"
 }
