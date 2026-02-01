@@ -14,6 +14,7 @@ INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
 KEY_FILE="${BOBNET_KEY:-$HOME/.secrets/bobnet-vault.key}"
 REPO_URL=""
 REPO_MODE="new"
+VERBOSE=false
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -21,9 +22,16 @@ while [[ $# -gt 0 ]]; do
         --clone) REPO_URL="$2"; REPO_MODE="clone"; shift 2 ;;
         --key) KEY_FILE="$2"; shift 2 ;;
         --dir) INSTALL_DIR="$2"; shift 2 ;;
+        --verbose|-v) VERBOSE=true; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+log() { $VERBOSE && echo "[DEBUG] $*"; }
+log "INSTALL_DIR=$INSTALL_DIR"
+log "KEY_FILE=$KEY_FILE"
+log "REPO_URL=$REPO_URL"
+log "REPO_MODE=$REPO_MODE"
 
 echo "═══════════════════════════════════════════════════════════"
 echo " BobNet Installer"
@@ -237,7 +245,10 @@ EOF
 esac
 
 # Always extract latest scripts
+log "Extracting scripts to $INSTALL_DIR/scripts/"
 extract_scripts "$INSTALL_DIR"
+log "Scripts extracted"
+log "bobnet script: $(head -5 "$INSTALL_DIR/scripts/bobnet" | tail -1)"
 
 #######################################
 # Install to PATH
@@ -265,6 +276,10 @@ echo "  ✓ installed: ~/.local/bin/bobnet"
 #######################################
 
 if [[ -n "$CLAW_CMD" && "$REPO_MODE" != "new" ]]; then
+    log "Running: $INSTALL_DIR/scripts/bobnet setup"
+    log "CLAW_CMD=$CLAW_CMD"
+    log "Checking bobnet cmd_setup:"
+    $VERBOSE && grep -A5 "cmd_setup()" "$INSTALL_DIR/scripts/bobnet" | head -10
     ./scripts/bobnet setup
 fi
 
