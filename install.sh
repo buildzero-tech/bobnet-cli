@@ -292,7 +292,7 @@ cmd_lock() { cd "$BOBNET_ROOT" && git-crypt lock && echo "Locked ✓"; }
 cmd_update() {
     echo "Checking for updates..."
     local current="$BOBNET_CLI_VERSION"
-    local remote=$(curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" 2>/dev/null | grep '^BOBNET_CLI_VERSION=' | cut -d'"' -f2)
+    local remote=$(curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" 2>/dev/null | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
     [[ -z "$remote" ]] && error "Could not fetch remote version"
     
     if [[ "$current" == "$remote" ]]; then
