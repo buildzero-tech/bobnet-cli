@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.1.0"
+BOBNET_CLI_VERSION="3.2.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -78,14 +78,10 @@ AGENTS_SH
 # BobNet CLI v3
 BOBNET_CLI_VERSION=$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")
 
-# Detect config directory
-if [[ -d "$HOME/.openclaw" ]]; then
-    CONFIG_DIR="$HOME/.openclaw"; CONFIG_NAME="openclaw.json"; CLI_NAME="openclaw"
-elif [[ -d "$HOME/.clawdbot" ]]; then
-    CONFIG_DIR="$HOME/.clawdbot"; CONFIG_NAME="clawdbot.json"; CLI_NAME="clawdbot"
-else
-    CONFIG_DIR="$HOME/.openclaw"; CONFIG_NAME="openclaw.json"; CLI_NAME="openclaw"
-fi
+# Config directory
+CONFIG_DIR="$HOME/.openclaw"
+CONFIG_NAME="openclaw.json"
+CLI_NAME="openclaw"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 error() { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
@@ -105,7 +101,6 @@ cmd_status() {
 cmd_install() {
     echo "Installing BobNet agents into $CLI_NAME..."
     local claw=""
-    command -v clawdbot &>/dev/null && claw="clawdbot"
     command -v openclaw &>/dev/null && claw="openclaw"
     [[ -z "$claw" ]] && error "$CLI_NAME not found"
     
@@ -133,12 +128,18 @@ cmd_install() {
 }
 
 cmd_uninstall() {
-    local force=false remove_repo=false
+    local force=false remove_repo=false remove_cli=false
     while [[ $# -gt 0 ]]; do
-        case "$1" in --force) force=true; shift ;; --remove-repo) remove_repo=true; shift ;; -h|--help) echo "Usage: bobnet uninstall [--force] [--remove-repo]"; return 0 ;; *) shift ;; esac
+        case "$1" in
+            --force) force=true; shift ;;
+            --remove-repo) remove_repo=true; shift ;;
+            --cli) remove_cli=true; shift ;;
+            -h|--help) echo "Usage: bobnet uninstall [--force] [--remove-repo] [--cli]"; return 0 ;;
+            *) shift ;;
+        esac
     done
     
-    local claw=""; command -v clawdbot &>/dev/null && claw="clawdbot"; command -v openclaw &>/dev/null && claw="openclaw"
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
     [[ -z "$claw" ]] && error "$CLI_NAME not found"
     local config="$CONFIG_DIR/$CONFIG_NAME"
     
@@ -151,6 +152,7 @@ cmd_uninstall() {
     fi
     
     [[ "$remove_repo" == "true" ]] && rm -rf "$BOBNET_ROOT" && success "removed $BOBNET_ROOT"
+    [[ "$remove_cli" == "true" ]] && rm -f ~/.local/bin/bobnet && rm -rf ~/.local/lib/bobnet && success "removed CLI"
     success "BobNet uninstalled"
 }
 
@@ -160,7 +162,7 @@ cmd_eject() {
         case "$1" in --force) force=true; shift ;; -h|--help) echo "Usage: bobnet eject [--force]"; return 0 ;; *) shift ;; esac
     done
     
-    local claw=""; command -v clawdbot &>/dev/null && claw="clawdbot"; command -v openclaw &>/dev/null && claw="openclaw"
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
     [[ -z "$claw" ]] && error "$CLI_NAME not found"
     
     echo "=== BobNet Eject ==="
@@ -216,7 +218,7 @@ cmd_scope() {
 
 cmd_binding() {
     local subcmd="${1:-list}"; shift 2>/dev/null || true
-    local claw=""; command -v clawdbot &>/dev/null && claw="clawdbot"; command -v openclaw &>/dev/null && claw="openclaw"
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
     case "$subcmd" in
         list|ls)
             echo "=== Agent Bindings ==="; echo ""; echo "Schema:"
@@ -416,9 +418,8 @@ fi
 echo "  ✓ jq"
 
 CLAW_CMD=""
-command -v clawdbot &>/dev/null && CLAW_CMD="clawdbot"
 command -v openclaw &>/dev/null && CLAW_CMD="openclaw"
-[[ -n "$CLAW_CMD" ]] && echo "  ✓ $CLAW_CMD" || echo "  ⚠ openclaw not found (install later)"
+[[ -n "$CLAW_CMD" ]] && echo "  ✓ openclaw" || echo "  ⚠ openclaw not found (install later)"
 
 # Key check for clone/existing
 if [[ "$REPO_MODE" != "new" && ! -f "$KEY_FILE" ]]; then
