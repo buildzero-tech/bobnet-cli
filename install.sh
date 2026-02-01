@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.10"
+BOBNET_CLI_VERSION="4.0.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -132,24 +132,31 @@ EOF
     local config="$CONFIG_DIR/$CONFIG_NAME"
     [[ -f "$config" && ! -f "${config}.pre-bobnet" ]] && cp "$config" "${config}.pre-bobnet" && success "backed up config"
     
-    # Build agents list with main FIRST (important for default routing)
+    # Build agents list
+    # - Reserved agents (like main) are preserved from existing config
+    # - BobNet agents get BobNet paths
     local list='[' first=true
-    # Add bob/main first
-    local bob_default=$(jq -r '.agents.bob.default // false' "$AGENTS_SCHEMA")
-    list+="{\"id\":\"main\",\"workspace\":\"$(get_workspace bob)\",\"agentDir\":\"$(get_agent_dir bob)\""
-    [[ "$bob_default" == "true" ]] && list+=",\"default\":true"
-    list+="}"
-    first=false
-    success "agent: main"
-    # Add remaining agents
+    
+    # Preserve existing main agent if present
+    local existing_main=$($claw config get agents.list 2>/dev/null | jq -c '.[] | select(.id == "main")' 2>/dev/null || echo '')
+    if [[ -n "$existing_main" ]]; then
+        list+="$existing_main"
+        first=false
+        success "agent: main (preserved)"
+    fi
+    
+    # Add BobNet agents (skip reserved)
     for agent in $(get_all_agents); do
-        [[ "$agent" == "bob" ]] && continue  # already added as main
-        local id="$agent"
+        local is_reserved=$(jq -r --arg a "$agent" '.agents[$a].reserved // false' "$AGENTS_SCHEMA")
+        [[ "$is_reserved" == "true" ]] && continue
+        
         local is_default=$(jq -r --arg a "$agent" '.agents[$a].default // false' "$AGENTS_SCHEMA")
-        list+=",{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\""
+        $first || list+=','
+        first=false
+        list+="{\"id\":\"$agent\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\""
         [[ "$is_default" == "true" ]] && list+=",\"default\":true"
         list+="}"
-        success "agent: $id"
+        success "agent: $agent"
     done
     list+=']'
     
@@ -279,7 +286,7 @@ cmd_eject() {
     echo "=== BobNet Eject ==="
     echo "Agents to migrate:"
     for agent in $(get_all_agents); do
-        local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+        local id="$agent"
         echo "  • $id → $CONFIG_DIR/agents/$id"
     done
     echo ""
@@ -289,7 +296,7 @@ cmd_eject() {
     mkdir -p "$CONFIG_DIR/agents" "$CONFIG_DIR/workspace"
     local list='[' first=true
     for agent in $(get_all_agents); do
-        local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+        local id="$agent"
         local src_a=$(get_agent_dir "$agent") src_w=$(get_workspace "$agent")
         local dst_a="$CONFIG_DIR/agents/$id" dst_w="$CONFIG_DIR/workspace/$id"
         [[ -d "$src_a" ]] && cp -r "$src_a" "$dst_a" && success "agents/$id"
@@ -313,7 +320,7 @@ cmd_agent() {
         list|ls)
             echo "=== BobNet Agents ==="
             for agent in $(get_all_agents); do
-                local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+                local id="$agent"
                 local ws=$(get_workspace "$agent")
                 local ad=$(get_agent_dir "$agent")
                 local ws_ok="✓"; [[ -d "$ws" ]] || ws_ok="✗"
@@ -326,7 +333,7 @@ cmd_agent() {
             [[ -z "$name" ]] && error "Usage: bobnet agent add <name>"
             
             # Check agent in schema
-            local schema_name="$name"; [[ "$name" == "main" ]] && schema_name="bob"
+            local schema_name="$name"
             if ! jq -e --arg a "$schema_name" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
                 error "Agent '$name' not in schema. Add to agents-schema.json first."
             fi
@@ -374,7 +381,7 @@ cmd_agent() {
             [[ -z "$name" ]] && error "Usage: bobnet agent default <name>"
             
             # Normalize name
-            local schema_name="$name"; [[ "$name" == "main" ]] && schema_name="bob"
+            local schema_name="$name"
             
             # Check agent exists in schema
             if ! jq -e --arg a "$schema_name" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
@@ -414,7 +421,7 @@ Commands:
 
 Examples:
   bobnet agent list
-  bobnet agent default main
+  bobnet agent default bob
   bobnet agent add family
 EOF
             ;;
@@ -431,7 +438,7 @@ cmd_scope() {
                 local label=$(jq -r --arg s "$scope" '.scopes[$s].label // $s' "$AGENTS_SCHEMA")
                 echo ""; echo "[$label] ($scope)"
                 for agent in $(get_agents_by_scope "$scope"); do
-                    local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+                    local id="$agent"
                     local mark="✓"; [[ -d "$(get_workspace "$agent")" ]] || mark="✗"
                     echo "  $mark $id"
                 done
@@ -439,7 +446,7 @@ cmd_scope() {
         -h|--help|help) echo "Usage: bobnet scope [list|<scope-name>]" ;;
         *)
             if jq -e --arg s "$subcmd" '.scopes[$s]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
-                echo "=== Scope: $subcmd ==="; for agent in $(get_agents_by_scope "$subcmd"); do local id="$agent"; [[ "$agent" == "bob" ]] && id="main"; echo "  $id"; done
+                echo "=== Scope: $subcmd ==="; for agent in $(get_agents_by_scope "$subcmd"); do local id="$agent"; echo "  $id"; done
             else error "Unknown scope: $subcmd"; fi ;;
     esac
 }
@@ -615,7 +622,7 @@ EOF
     
     # 1. Check agents
     echo "--- Agents ---"
-    local schema_agents=$(get_all_agents | while read a; do [[ "$a" == "bob" ]] && echo "main" || echo "$a"; done | sort)
+    local schema_agents=$(get_all_agents | grep -v '^main$' | sort)
     local config_agents=$($claw config get agents.list 2>/dev/null | jq -r '.[].id' 2>/dev/null | sort)
     
     local missing="" extra=""
@@ -728,7 +735,7 @@ EOF
     # Rebuild agents list
     local list='[' first=true
     for agent in $(get_all_agents); do
-        local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+        local id="$agent"
         $first || list+=','; first=false
         list+="{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\"}"
     done
@@ -811,7 +818,7 @@ cmd_validate() {
         if [[ -n "$claw" ]]; then
             # 1. No BobNet agents in config
             local config_agents=$($claw config get agents.list 2>/dev/null | jq -r '.[].id' | sort)
-            local schema_agents=$(get_all_agents | while read a; do [[ "$a" == "bob" ]] && echo "main" || echo "$a"; done | sort)
+            local schema_agents=$(get_all_agents | grep -v '^main$' | sort)
             local remaining=""
             for agent in $schema_agents; do
                 echo "$config_agents" | grep -q "^${agent}$" && remaining="$remaining $agent"
@@ -870,7 +877,7 @@ cmd_validate() {
         # NORMAL MODE: verify install is correct
         if [[ -n "$claw" ]]; then
             local config_agents=$($claw config get agents.list 2>/dev/null | jq -r '.[].id' | sort)
-            local schema_agents=$(get_all_agents | while read a; do [[ "$a" == "bob" ]] && echo "main" || echo "$a"; done | sort)
+            local schema_agents=$(get_all_agents | grep -v '^main$' | sort)
             local missing=""
             for agent in $schema_agents; do
                 echo "$config_agents" | grep -q "^${agent}$" || missing="$missing $agent"
@@ -913,7 +920,7 @@ cmd_validate() {
         else
             echo -e "${RED}✗${NC} Missing directories for:$agents_incomplete"
             for agent in $agents_incomplete; do
-                local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
+                local id="$agent"
                 echo ""
                 read -p "    Add agent '$id'? [Y/n] " -n 1 -r; echo ""
                 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
