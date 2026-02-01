@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.7.1"
+BOBNET_CLI_VERSION="3.7.2"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -747,7 +747,7 @@ case "${1:-help}" in
                 # Also check orgs user has access to
                 while IFS= read -r org; do
                     if gh repo view "$org/ultima-thule" &>/dev/null 2>&1; then
-                        [[ ! " ${repos[*]} " =~ " $org/ultima-thule " ]] && repos+=("$org/ultima-thule")
+                        [[ ! " ${repos[*]:-} " =~ " $org/ultima-thule " ]] && repos+=("$org/ultima-thule")
                     fi
                 done < <(gh org list 2>/dev/null || true)
             fi
