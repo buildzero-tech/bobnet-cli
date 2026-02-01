@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="3.9.3"
+BOBNET_CLI_VERSION="3.9.4"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -1040,6 +1040,12 @@ case "${1:-help}" in
         echo "bobnet v$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")"
         exit 0 ;;
     update)
+        if [[ "${2:-}" == "-h" || "${2:-}" == "--help" ]]; then
+            echo "Usage: bobnet update"
+            echo ""
+            echo "Update bobnet CLI to the latest version from GitHub."
+            exit 0
+        fi
         curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash -s -- --update
         exit 0 ;;
     install|setup)
