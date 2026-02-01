@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.5"
+BOBNET_CLI_VERSION="4.0.6"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -1220,6 +1220,11 @@ case "${1:-help}" in
                         exec curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" | bash ;;
                 esac
             fi
+        fi ;;
+    uninstall)
+        if [[ -z "$BOBNET_ROOT" ]]; then
+            echo "Nothing to uninstall — no BobNet repo found."
+            exit 0
         fi ;;
 esac
 
