@@ -146,32 +146,34 @@ cmd_status() {
 }
 cmd_setup() {
     echo "Configuring OpenClaw..."
+    local claw=""
+    command -v clawdbot &>/dev/null && claw="clawdbot"
+    command -v openclaw &>/dev/null && claw="openclaw"
+    [[ -z "$claw" ]] && { echo "openclaw/clawdbot not found" >&2; exit 1; }
     
-    # Find config file
-    local config=""
-    [[ -f "$HOME/.openclaw/openclaw.json" ]] && config="$HOME/.openclaw/openclaw.json"
-    [[ -f "$HOME/.clawdbot/clawdbot.json" ]] && config="$HOME/.clawdbot/clawdbot.json"
-    [[ -z "$config" ]] && { echo "Config not found" >&2; exit 1; }
+    # Stop gateway to prevent restart on each config change
+    echo "  Stopping gateway..."
+    $claw gateway stop 2>/dev/null || true
     
-    # Build agents list JSON
-    local agents='[]'
+    # Set default workspace
+    $claw config set agents.defaults.workspace "$(get_workspace bob)" >/dev/null
+    
+    # Set each agent
+    local i=0
     for agent in $(get_all_agents); do
         local id="$agent"; [[ "$agent" == "bob" ]] && id="main"
-        agents=$(echo "$agents" | jq --arg id "$id" \
-            --arg ws "$(get_workspace "$agent")" \
-            --arg ad "$(get_agent_dir "$agent")" \
-            '. + [{"id": $id, "workspace": $ws, "agentDir": $ad}]')
+        $claw config set "agents.list[$i].id" "$id" >/dev/null
+        $claw config set "agents.list[$i].workspace" "$(get_workspace "$agent")" >/dev/null
+        $claw config set "agents.list[$i].agentDir" "$(get_agent_dir "$agent")" >/dev/null
+        echo "  ✓ $id"
+        ((i++))
     done
     
-    # Update config file
-    local tmp=$(mktemp)
-    jq --arg ws "$(get_workspace bob)" --argjson list "$agents" \
-        '.agents.defaults.workspace = $ws | .agents.list = $list' \
-        "$config" > "$tmp" && mv "$tmp" "$config"
+    # Start gateway
+    echo "  Starting gateway..."
+    $claw gateway start
     
-    echo "  Updated: $config"
-    echo "  Agents: $(echo "$agents" | jq length)"
-    echo "Done ✓ (restart gateway to apply)"
+    echo "Done ✓"
 }
 cmd_unlock() {
     local key="${1:-$HOME/.secrets/bobnet-vault.key}"
