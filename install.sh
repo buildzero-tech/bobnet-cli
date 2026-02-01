@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.1"
+BOBNET_CLI_VERSION="4.0.2"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -132,24 +132,10 @@ EOF
     local config="$CONFIG_DIR/$CONFIG_NAME"
     [[ -f "$config" && ! -f "${config}.pre-bobnet" ]] && cp "$config" "${config}.pre-bobnet" && success "backed up config"
     
-    # Build agents list
-    # - Reserved agents (like main) are preserved from existing config
-    # - BobNet agents get BobNet paths
+    # Build agents list - all agents get BobNet paths
     local list='[' first=true
     
-    # Preserve existing main agent if present
-    local existing_main=$($claw config get agents.list 2>/dev/null | jq -c '.[] | select(.id == "main")' 2>/dev/null || echo '')
-    if [[ -n "$existing_main" ]]; then
-        list+="$existing_main"
-        first=false
-        success "agent: main (preserved)"
-    fi
-    
-    # Add BobNet agents (skip reserved)
     for agent in $(get_all_agents); do
-        local is_reserved=$(jq -r --arg a "$agent" '.agents[$a].reserved // false' "$AGENTS_SCHEMA")
-        [[ "$is_reserved" == "true" ]] && continue
-        
         local is_default=$(jq -r --arg a "$agent" '.agents[$a].default // false' "$AGENTS_SCHEMA")
         $first || list+=','
         first=false
@@ -173,20 +159,24 @@ EOF
         $claw config set "channels.$channel" "$channel_config" --json 2>/dev/null && success "channel: $channel"
     done
     
-    # Offer to migrate files from main → bob if bob's workspace is empty
-    local bob_ws=$(get_workspace bob)
-    local main_ws="$CONFIG_DIR/workspace"
-    if [[ ! -f "$bob_ws/SOUL.md" && -f "$main_ws/SOUL.md" ]]; then
+    # Migrate main agent files from OpenClaw defaults to BobNet structure
+    local oc_main_ws="$CONFIG_DIR/workspace"
+    local oc_main_ad="$CONFIG_DIR/agents/main"
+    local bn_main_ws=$(get_workspace main)
+    local bn_main_ad=$(get_agent_dir main)
+    
+    # Migrate workspace
+    if [[ -d "$oc_main_ws" && ! -d "$bn_main_ws" ]]; then
         echo ""
-        echo "Found existing files in OpenClaw main workspace."
-        read -p "Migrate files to bob workspace? [Y/n] " -n 1 -r; echo ""
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-            mkdir -p "$bob_ws"
-            for f in SOUL.md USER.md IDENTITY.md TOOLS.md MEMORY.md HEARTBEAT.md; do
-                [[ -f "$main_ws/$f" ]] && cp "$main_ws/$f" "$bob_ws/" && success "migrated $f"
-            done
-            [[ -d "$main_ws/memory" ]] && cp -r "$main_ws/memory" "$bob_ws/" && success "migrated memory/"
-        fi
+        echo "Migrating main agent to BobNet structure..."
+        mkdir -p "$(dirname "$bn_main_ws")"
+        mv "$oc_main_ws" "$bn_main_ws" && success "workspace: $oc_main_ws → $bn_main_ws"
+    fi
+    
+    # Migrate agent dir
+    if [[ -d "$oc_main_ad" && ! -d "$bn_main_ad" ]]; then
+        mkdir -p "$(dirname "$bn_main_ad")"
+        mv "$oc_main_ad" "$bn_main_ad" && success "agentDir: $oc_main_ad → $bn_main_ad"
     fi
     
     echo ""; success "BobNet installed"
@@ -300,14 +290,14 @@ cmd_eject() {
     [[ -z "$claw" ]] && error "$CLI_NAME not found"
     
     echo "=== BobNet Eject ==="
-    echo "Agents to migrate:"
+    echo "Agents to migrate to OpenClaw paths:"
     for agent in $(get_all_agents); do
-        local is_reserved=$(jq -r --arg a "$agent" '.agents[$a].reserved // false' "$AGENTS_SCHEMA")
-        [[ "$is_reserved" == "true" ]] && continue
-        echo "  • $agent → $CONFIG_DIR/agents/$agent"
+        if [[ "$agent" == "main" ]]; then
+            echo "  • main → $CONFIG_DIR/workspace (default)"
+        else
+            echo "  • $agent → $CONFIG_DIR/workspace/$agent"
+        fi
     done
-    echo ""
-    echo "Note: Reserved agents (main) stay in place."
     echo ""
     
     [[ "$force" == "false" ]] && { read -p "Continue? [y/N] " -n 1 -r; echo ""; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
@@ -315,19 +305,19 @@ cmd_eject() {
     mkdir -p "$CONFIG_DIR/agents" "$CONFIG_DIR/workspace"
     local list='[' first=true
     
-    # Preserve existing main
-    local existing_main=$($claw config get agents.list 2>/dev/null | jq -c '.[] | select(.id == "main")' 2>/dev/null || echo '')
-    if [[ -n "$existing_main" ]]; then
-        list+="$existing_main"
-        first=false
-    fi
-    
     for agent in $(get_all_agents); do
-        local is_reserved=$(jq -r --arg a "$agent" '.agents[$a].reserved // false' "$AGENTS_SCHEMA")
-        [[ "$is_reserved" == "true" ]] && continue
-        
         local src_a=$(get_agent_dir "$agent") src_w=$(get_workspace "$agent")
-        local dst_a="$CONFIG_DIR/agents/$agent" dst_w="$CONFIG_DIR/workspace/$agent"
+        local dst_a dst_w
+        
+        if [[ "$agent" == "main" ]]; then
+            # Main goes to OpenClaw defaults (no subfolder)
+            dst_a="$CONFIG_DIR/agents/main"
+            dst_w="$CONFIG_DIR/workspace"
+        else
+            dst_a="$CONFIG_DIR/agents/$agent"
+            dst_w="$CONFIG_DIR/workspace/$agent"
+        fi
+        
         [[ -d "$src_a" ]] && cp -r "$src_a" "$dst_a" && success "agents/$agent"
         [[ -d "$src_w" ]] && cp -r "$src_w" "$dst_w" && success "workspace/$agent"
         $first || list+=','
