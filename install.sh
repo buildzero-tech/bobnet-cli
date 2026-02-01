@@ -208,8 +208,17 @@ EOF
     clone)
         echo "Cloning $REPO_URL..."
         mkdir -p "$(dirname "$INSTALL_DIR")"
-        git clone -q "$REPO_URL" "$INSTALL_DIR" && cd "$INSTALL_DIR"
-        git-crypt unlock "$KEY_FILE"
+        if ! git clone -q "$REPO_URL" "$INSTALL_DIR"; then
+            echo "✗ Clone failed. Check:" >&2
+            echo "  - SSH key: ssh -T git@github.com" >&2
+            echo "  - Or use HTTPS: --clone https://github.com/..." >&2
+            exit 1
+        fi
+        cd "$INSTALL_DIR"
+        if ! git-crypt unlock "$KEY_FILE"; then
+            echo "✗ Unlock failed. Check key file: $KEY_FILE" >&2
+            exit 1
+        fi
         echo "  ✓ cloned and unlocked"
         ;;
     existing)
