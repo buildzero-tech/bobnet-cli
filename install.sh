@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.10"
+BOBNET_CLI_VERSION="4.0.11"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -1068,6 +1068,22 @@ cmd_validate() {
     fi
 }
 
+cmd_report() {
+    [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && {
+        echo "Usage: bobnet report"
+        echo ""
+        echo "Run systems health check."
+        echo "Checks disk, memory, OpenClaw, Signal, Tailscale, and repo status."
+        return 0
+    }
+    local script="$BOBNET_ROOT/scripts/systems-report"
+    if [[ -x "$script" ]]; then
+        "$script"
+    else
+        error "Systems report script not found: $script"
+    fi
+}
+
 cmd_help() {
     cat <<EOF
 BobNet CLI v$BOBNET_CLI_VERSION
@@ -1077,6 +1093,7 @@ USAGE:
 
 COMMANDS:
   status              Show agents and repo status
+  report              Systems health check (disk, memory, services)
   install             Configure OpenClaw with BobNet agents
   uninstall           Remove BobNet config from OpenClaw
   validate            Validate BobNet configuration
@@ -1098,6 +1115,7 @@ EOF
 bobnet_main() {
     case "${1:-help}" in
         status) cmd_status ;;
+        report) shift; cmd_report "$@" ;;
         install|setup) shift; cmd_install "$@" ;;
         uninstall) shift; cmd_uninstall "$@" ;;
         eject) shift; cmd_eject "$@" ;;
