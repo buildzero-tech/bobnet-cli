@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.9"
+BOBNET_CLI_VERSION="4.0.10"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"
@@ -406,6 +406,10 @@ cmd_agent() {
                     $claw agents add "$name" --workspace "$ws" --agent-dir "$ad" --non-interactive
                     success "Added to OpenClaw"
                 fi
+                
+                # Clean up nested .git directories (BobNet uses one repo, not per-agent repos)
+                [[ -d "$ws/.git" ]] && rm -rf "$ws/.git" && success "Removed nested .git from workspace"
+                [[ -d "$ad/.git" ]] && rm -rf "$ad/.git" && success "Removed nested .git from agent dir"
             else
                 warn "OpenClaw not found, skipping config update"
                 echo "  Run 'bobnet install' to sync config"
