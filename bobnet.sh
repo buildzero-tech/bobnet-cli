@@ -1598,11 +1598,13 @@ EOF
             
             # Get active sessions (active in last hour)
             echo "--- Phase 1: Prep agents ---"
+            # Extract agent ID from session key (format: agent:<agentId>:...)
             local sessions=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
                 .sessions[] | 
                 select(.deliveryContext != null) |
                 select(.updatedAt > (now - 3600) * 1000) |
-                "\(.agentId)|\(.key)"
+                select(.key | startswith("agent:")) |
+                (.key | split(":")[1]) + "|" + .key
             ' 2>/dev/null | sort -u)
             
             local agents_prepped=()
@@ -1638,25 +1640,29 @@ EOF
             local deadline=$(($(date +%s) + timeout))
             local ready_count=0
             
-            while [[ $(date +%s) -lt $deadline ]]; do
-                ready_count=0
-                for agent in "${agents_prepped[@]}"; do
-                    [[ -f "$BOBNET_ROOT/workspace/$agent/READY.md" ]] && ((ready_count++))
+            if [[ $expected -eq 0 ]]; then
+                echo "  No agents to wait for"
+            else
+                while [[ $(date +%s) -lt $deadline ]]; do
+                    ready_count=0
+                    for agent in "${agents_prepped[@]}"; do
+                        [[ -f "$BOBNET_ROOT/workspace/$agent/READY.md" ]] && ((ready_count++))
+                    done
+                    
+                    echo -ne "\r  $ready_count/$expected ready...  "
+                    
+                    if [[ $ready_count -ge $expected ]]; then
+                        break
+                    fi
+                    sleep 2
                 done
-                
-                echo -ne "\r  $ready_count/$expected ready...  "
+                echo ""
                 
                 if [[ $ready_count -ge $expected ]]; then
-                    break
+                    success "All agents ready"
+                else
+                    warn "Timeout: $ready_count/$expected ready (proceeding anyway)"
                 fi
-                sleep 2
-            done
-            echo ""
-            
-            if [[ $ready_count -ge $expected ]]; then
-                success "All agents ready"
-            else
-                warn "Timeout: $ready_count/$expected ready (proceeding anyway)"
             fi
             
             # Restart gateway (goes DOWN)
