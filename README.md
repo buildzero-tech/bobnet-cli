@@ -1,6 +1,8 @@
 # BobNet
 
-Multi-agent orchestration framework for OpenClaw/Clawdbot.
+[![CI](https://github.com/buildzero-tech/bobnet-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/buildzero-tech/bobnet-cli/actions/workflows/ci.yml)
+
+Multi-agent orchestration framework for OpenClaw.
 
 ## Install
 
@@ -23,20 +25,45 @@ curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/inst
 ## CLI
 
 ```bash
-bobnet status   # Show agents and repo status
-bobnet setup    # Configure OpenClaw with agent paths
-bobnet unlock   # Unlock git-crypt
-bobnet lock     # Lock git-crypt
+bobnet status            # Show agents and repo status
+bobnet install           # Configure OpenClaw with BobNet agents
+bobnet report            # Systems health check
+bobnet memory status     # Show memory index status
+bobnet memory rebuild    # Rebuild memory search indexes
+bobnet search <pattern>  # Search session transcripts
+bobnet search --errors   # Find common error patterns
+bobnet unlock            # Unlock git-crypt
+bobnet lock              # Lock git-crypt
+bobnet update            # Update CLI to latest version
 ```
+
+Run `bobnet help` or `bobnet <command> --help` for details.
 
 ## Structure
 
 ```
 ~/.bobnet/ultima-thule/
-├── agents/           # Encrypted: credentials, sessions
+├── agents/           # Encrypted: credentials, auth profiles
 ├── workspace/        # Agent workspaces (SOUL.md, MEMORY.md, etc.)
 ├── collective/       # Shared resources (patterns, projects, rules)
-├── core/             # Base AGENTS.md
-├── config/           # agents-schema.v3.json
-└── scripts/          # bobnet CLI
+├── core/             # Base AGENTS.md, templates
+├── config/           # agents-schema.json
+├── docs/             # Documentation
+└── scripts/          # Installation-specific scripts
+```
+
+## Development
+
+```bash
+# Check syntax
+bash -n bobnet.sh
+
+# Bump version
+./scripts/bump-version.sh patch  # or minor, major
+
+# Release
+git add version
+git commit -m "chore: bump version to X.Y.Z"
+git tag vX.Y.Z
+git push origin main vX.Y.Z
 ```
