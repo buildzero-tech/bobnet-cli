@@ -1280,6 +1280,141 @@ EOF
     esac
 }
 
+cmd_link() {
+    local OC_AGENTS="$CONFIG_DIR/agents"
+    local BN_AGENTS="$BOBNET_ROOT/agents"
+    
+    case "${1:-status}" in
+        -h|--help|help)
+            cat <<'EOF'
+Usage: bobnet link [command]
+
+Manage symlinks from ~/.openclaw/agents/ to BobNet agents directory.
+
+COMMANDS:
+  status    Show link status for all agents (default)
+  create    Create missing symlinks (migrates existing data)
+  check     Validate all links are correct (exit 1 if issues)
+
+EXAMPLES:
+  bobnet link              # Show status
+  bobnet link create       # Create/fix all symlinks
+  bobnet link check        # Validate (for CI/scripts)
+EOF
+            return 0
+            ;;
+        status)
+            echo "Agent Directory Links"
+            echo "====================="
+            echo "OpenClaw: $OC_AGENTS"
+            echo "BobNet:   $BN_AGENTS"
+            echo ""
+            
+            local issues=0
+            for agent_dir in "$BN_AGENTS"/*/; do
+                [[ -d "$agent_dir" ]] || continue
+                local agent=$(basename "$agent_dir")
+                local oc_path="$OC_AGENTS/$agent"
+                
+                if [[ -L "$oc_path" ]]; then
+                    local target=$(readlink "$oc_path")
+                    if [[ "$target" == "$BN_AGENTS/$agent" ]]; then
+                        echo -e "  ${GREEN}✓${NC} $agent → linked"
+                    else
+                        echo -e "  ${YELLOW}⚠${NC} $agent → wrong target: $target"
+                        ((issues++))
+                    fi
+                elif [[ -d "$oc_path" ]]; then
+                    echo -e "  ${YELLOW}⚠${NC} $agent → real directory (needs migration)"
+                    ((issues++))
+                else
+                    echo -e "  ${YELLOW}⚠${NC} $agent → missing"
+                    ((issues++))
+                fi
+            done
+            
+            echo ""
+            if [[ $issues -gt 0 ]]; then
+                echo "Run 'bobnet link create' to fix $issues issue(s)"
+                return 1
+            else
+                echo "All links OK"
+            fi
+            ;;
+        create)
+            echo "Creating agent directory links..."
+            mkdir -p "$OC_AGENTS"
+            
+            for agent_dir in "$BN_AGENTS"/*/; do
+                [[ -d "$agent_dir" ]] || continue
+                local agent=$(basename "$agent_dir")
+                local oc_path="$OC_AGENTS/$agent"
+                local bn_path="$BN_AGENTS/$agent"
+                
+                if [[ -L "$oc_path" ]]; then
+                    local target=$(readlink "$oc_path")
+                    if [[ "$target" == "$bn_path" ]]; then
+                        success "$agent: already linked"
+                    else
+                        rm "$oc_path"
+                        ln -s "$bn_path" "$oc_path"
+                        success "$agent: relinked (was: $target)"
+                    fi
+                elif [[ -d "$oc_path" ]]; then
+                    # Migrate existing data
+                    echo "  Migrating $agent..."
+                    
+                    # Copy any files from OC to BN that don't exist in BN
+                    for item in "$oc_path"/*; do
+                        [[ -e "$item" ]] || continue
+                        local name=$(basename "$item")
+                        if [[ ! -e "$bn_path/$name" ]]; then
+                            cp -r "$item" "$bn_path/"
+                            echo "    Migrated: $name"
+                        fi
+                    done
+                    
+                    # Remove OC directory and create symlink
+                    rm -rf "$oc_path"
+                    ln -s "$bn_path" "$oc_path"
+                    success "$agent: migrated and linked"
+                else
+                    ln -s "$bn_path" "$oc_path"
+                    success "$agent: linked"
+                fi
+            done
+            
+            echo ""
+            echo "Done. Restart gateway to apply: openclaw gateway restart"
+            ;;
+        check)
+            # Silent check for scripts/CI
+            local issues=0
+            for agent_dir in "$BN_AGENTS"/*/; do
+                [[ -d "$agent_dir" ]] || continue
+                local agent=$(basename "$agent_dir")
+                local oc_path="$OC_AGENTS/$agent"
+                
+                if [[ -L "$oc_path" ]]; then
+                    local target=$(readlink "$oc_path")
+                    [[ "$target" == "$BN_AGENTS/$agent" ]] || ((issues++))
+                else
+                    ((issues++))
+                fi
+            done
+            
+            if [[ $issues -gt 0 ]]; then
+                echo "Link check failed: $issues issue(s)"
+                return 1
+            fi
+            return 0
+            ;;
+        *)
+            error "Unknown link command: $1 (try 'bobnet link help')"
+            ;;
+    esac
+}
+
 cmd_help() {
     cat <<EOF
 BobNet CLI v$BOBNET_CLI_VERSION
@@ -1297,6 +1432,7 @@ COMMANDS:
   backup              Backup OpenClaw config to repo
   eject               Migrate agents to standard OpenClaw structure
   agent [cmd]         Manage agents (list, add)
+  link [cmd]          Manage agent directory symlinks
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
   memory [cmd]        Manage memory search indexes (status, rebuild)
@@ -1323,6 +1459,7 @@ bobnet_main() {
         agent) shift; cmd_agent "$@" ;;
         scope) shift; cmd_scope "$@" ;;
         binding) shift; cmd_binding "$@" ;;
+        link) shift; cmd_link "$@" ;;
         memory) shift; cmd_memory "$@" ;;
         search) shift; cmd_search "$@" ;;
         signal) shift; cmd_signal "$@" ;;
