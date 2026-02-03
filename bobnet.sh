@@ -1,4 +1,6 @@
+#!/usr/bin/env bash
 # BobNet CLI v3
+# shellcheck disable=SC2155  # Allow declare and assign on same line
 BOBNET_CLI_VERSION=$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")
 
 # Config directory
