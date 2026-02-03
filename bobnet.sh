@@ -1688,11 +1688,12 @@ EOF
             echo "Broadcasting restart warning..."
             
             # Get active sessions with delivery context
+            # Note: deliveryContext.to may have "signal:" prefix that needs converting to "uuid:" for CLI
             local sessions=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
                 .sessions[] | 
                 select(.deliveryContext != null) |
                 select(.updatedAt > (now - 3600) * 1000) |
-                "\(.deliveryContext.channel)|\(.deliveryContext.to)|\(.deliveryContext.accountId // "default")"
+                "\(.deliveryContext.channel)|\(.deliveryContext.to | gsub("^signal:"; "uuid:"))|\(.deliveryContext.accountId // "default")"
             ' 2>/dev/null | sort -u)
             
             local msg="⚠️ BobNet restarting in ${delay} seconds..."
@@ -1700,7 +1701,7 @@ EOF
             
             while IFS='|' read -r channel to accountId; do
                 [[ -z "$channel" || -z "$to" ]] && continue
-                if $claw message send --channel "$channel" --to "$to" --account "$accountId" --message "$msg" &>/dev/null; then
+                if $claw message send --channel "$channel" --target "$to" --account "$accountId" --message "$msg" &>/dev/null; then
                     ((count++))
                 fi
             done <<< "$sessions"
