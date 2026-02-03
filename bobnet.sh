@@ -1186,6 +1186,98 @@ EOF
     esac
 }
 
+cmd_search() {
+    local TRANSCRIPTS_BASE="$CONFIG_DIR/agents"
+    
+    search_all() {
+        local pattern="$1"
+        echo "Searching transcripts for: $pattern"
+        echo ""
+        
+        for agent_dir in "$TRANSCRIPTS_BASE"/*/; do
+            local agent=$(basename "$agent_dir")
+            [[ -d "$agent_dir/sessions" ]] || continue
+            
+            local count=$(grep -rci "$pattern" "$agent_dir/sessions/"*.jsonl 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+            if [[ "${count:-0}" -gt 0 ]]; then
+                echo "  $agent: $count matches"
+            fi
+        done
+    }
+    
+    search_agent() {
+        local agent="$1" pattern="$2"
+        echo "Searching $agent transcripts for: $pattern"
+        grep -ci "$pattern" "$TRANSCRIPTS_BASE/$agent/sessions/"*.jsonl 2>/dev/null || echo "No matches"
+    }
+    
+    find_errors() {
+        echo "=== Common Error Patterns ==="
+        echo ""
+        
+        local patterns=("error" "failed" "exception" "401" "403" "timeout" "not found" "unable to")
+        
+        for pattern in "${patterns[@]}"; do
+            local total=$(grep -rci "$pattern" "$TRANSCRIPTS_BASE"/*/sessions/*.jsonl 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+            if [[ "${total:-0}" -gt 0 ]]; then
+                printf "  %-20s %d occurrences\n" "$pattern" "$total"
+            fi
+        done
+    }
+    
+    summarize() {
+        echo "=== Transcript Summary ==="
+        echo ""
+        
+        for agent_dir in "$TRANSCRIPTS_BASE"/*/; do
+            local agent=$(basename "$agent_dir")
+            [[ -d "$agent_dir/sessions" ]] || continue
+            
+            local count=$(ls "$agent_dir/sessions/"*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+            local size=$(du -sh "$agent_dir/sessions" 2>/dev/null | cut -f1)
+            
+            if [[ "${count:-0}" -gt 0 ]]; then
+                echo "  $agent: $count sessions, $size"
+            fi
+        done
+    }
+    
+    case "${1:-}" in
+        -h|--help|"")
+            cat <<'EOF'
+Usage: bobnet search [agent] <pattern>
+       bobnet search --errors
+       bobnet search --summary
+
+Search agent session transcripts.
+
+EXAMPLES:
+  bobnet search error           Search all agents for 'error'
+  bobnet search bob failed      Search bob's transcripts for 'failed'
+  bobnet search --errors        Find common error patterns
+  bobnet search --summary       Show transcript sizes per agent
+EOF
+            return 0
+            ;;
+        --errors)
+            find_errors
+            ;;
+        --summary)
+            summarize
+            ;;
+        *)
+            if [[ -d "$TRANSCRIPTS_BASE/$1/sessions" ]]; then
+                local agent="$1"
+                local pattern="${2:-}"
+                [[ -z "$pattern" ]] && { echo "Usage: bobnet search <agent> <pattern>"; return 1; }
+                search_agent "$agent" "$pattern"
+            else
+                search_all "$1"
+            fi
+            ;;
+    esac
+}
+
 cmd_help() {
     cat <<EOF
 BobNet CLI v$BOBNET_CLI_VERSION
@@ -1206,6 +1298,7 @@ COMMANDS:
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
   memory [cmd]        Manage memory search indexes (status, rebuild)
+  search [pattern]    Search session transcripts (grep)
   signal [cmd]        Signal backup/restore
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
@@ -1229,6 +1322,7 @@ bobnet_main() {
         scope) shift; cmd_scope "$@" ;;
         binding) shift; cmd_binding "$@" ;;
         memory) shift; cmd_memory "$@" ;;
+        search) shift; cmd_search "$@" ;;
         signal) shift; cmd_signal "$@" ;;
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
