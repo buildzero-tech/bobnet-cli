@@ -10,7 +10,7 @@
 #
 set -euo pipefail
 
-BOBNET_CLI_VERSION="4.0.11"
+BOBNET_CLI_VERSION="4.1.0"
 BOBNET_CLI_URL="https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh"
 
 INSTALL_DIR="${BOBNET_DIR:-$HOME/.bobnet/ultima-thule}"

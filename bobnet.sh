@@ -1089,6 +1089,103 @@ cmd_report() {
     fi
 }
 
+cmd_memory() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        -h|--help|help)
+            cat <<'EOF'
+Usage: bobnet memory <command> [options]
+
+Manage memory search indexes for agents.
+
+COMMANDS:
+  status              Show index status for all agents
+  rebuild [agent]     Rebuild indexes (all agents or specific agent)
+
+EXAMPLES:
+  bobnet memory status
+  bobnet memory rebuild
+  bobnet memory rebuild bob
+EOF
+            return 0
+            ;;
+        status)
+            command -v openclaw &>/dev/null || error "openclaw not found"
+            echo "Memory Search Index Status"
+            echo "=========================="
+            for agent in $(openclaw agents list --json 2>/dev/null | jq -r '.[].id' 2>/dev/null); do
+                local status_output indexed total chunks
+                status_output=$(openclaw memory status --agent "$agent" 2>&1)
+                indexed=$(echo "$status_output" | grep "^Indexed:" | sed 's/Indexed: //' | cut -d'/' -f1)
+                total=$(echo "$status_output" | grep "^Indexed:" | sed 's/Indexed: //' | cut -d'/' -f2 | cut -d' ' -f1)
+                chunks=$(echo "$status_output" | grep "^Indexed:" | grep -o '[0-9]* chunks' | grep -o '[0-9]*' || echo "0")
+                
+                if [[ -z "$total" || "$total" == "0" ]]; then
+                    echo "  $agent: no memory files"
+                elif [[ "$indexed" == "$total" ]]; then
+                    echo -e "  $agent: ${GREEN}✓${NC} $indexed/$total files ($chunks chunks)"
+                else
+                    echo -e "  $agent: ${YELLOW}⚠${NC} $indexed/$total files (needs rebuild)"
+                fi
+            done
+            ;;
+        rebuild)
+            command -v openclaw &>/dev/null || error "openclaw not found"
+            local target_agent="${1:-}"
+            local rebuilt=0 skipped=0 failed=0
+            
+            echo "Memory Index Rebuild"
+            echo "===================="
+            
+            local agents
+            if [[ -n "$target_agent" ]]; then
+                agents="$target_agent"
+            else
+                agents=$(openclaw agents list --json 2>/dev/null | jq -r '.[].id' 2>/dev/null)
+            fi
+            
+            for agent in $agents; do
+                echo -n "  [$agent] "
+                
+                # Check if agent has memory files
+                local status_output total
+                status_output=$(openclaw memory status --agent "$agent" 2>&1)
+                total=$(echo "$status_output" | grep "^Indexed:" | sed 's/Indexed: //' | cut -d'/' -f2 | cut -d' ' -f1)
+                
+                if [[ -z "$total" || "$total" == "0" ]]; then
+                    echo "no memory files (skipped)"
+                    ((skipped++))
+                    continue
+                fi
+                
+                # Rebuild index
+                if openclaw memory index --agent "$agent" --force &>/dev/null; then
+                    local new_status indexed chunks
+                    new_status=$(openclaw memory status --agent "$agent" 2>&1)
+                    indexed=$(echo "$new_status" | grep "^Indexed:" | sed 's/Indexed: //' | cut -d'/' -f1)
+                    total=$(echo "$new_status" | grep "^Indexed:" | sed 's/Indexed: //' | cut -d'/' -f2 | cut -d' ' -f1)
+                    chunks=$(echo "$new_status" | grep "^Indexed:" | grep -o '[0-9]* chunks' | grep -o '[0-9]*')
+                    echo -e "${GREEN}✓${NC} indexed $indexed/$total files ($chunks chunks)"
+                    ((rebuilt++))
+                else
+                    echo -e "${RED}✗${NC} failed"
+                    ((failed++))
+                fi
+            done
+            
+            echo ""
+            echo "Summary: $rebuilt rebuilt, $skipped skipped, $failed failed"
+            [[ $failed -gt 0 ]] && return 1
+            return 0
+            ;;
+        *)
+            error "Unknown memory command: $subcmd (try 'bobnet memory help')"
+            ;;
+    esac
+}
+
 cmd_help() {
     cat <<EOF
 BobNet CLI v$BOBNET_CLI_VERSION
@@ -1108,6 +1205,7 @@ COMMANDS:
   agent [cmd]         Manage agents (list, add)
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
+  memory [cmd]        Manage memory search indexes (status, rebuild)
   signal [cmd]        Signal backup/restore
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
@@ -1130,6 +1228,7 @@ bobnet_main() {
         agent) shift; cmd_agent "$@" ;;
         scope) shift; cmd_scope "$@" ;;
         binding) shift; cmd_binding "$@" ;;
+        memory) shift; cmd_memory "$@" ;;
         signal) shift; cmd_signal "$@" ;;
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
