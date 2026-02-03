@@ -1608,7 +1608,19 @@ EOF
             ' 2>/dev/null | sort -u)
             
             local agents_prepped=()
-            while IFS='|' read -r agentId sessionKey; do
+            
+            # Get sessions with delivery context for messaging
+            local session_details=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
+                .sessions[] | 
+                select(.deliveryContext != null) |
+                select(.updatedAt > (now - 3600) * 1000) |
+                select(.key | startswith("agent:")) |
+                [(.key | split(":")[1]), .key, .deliveryContext.channel, (.deliveryContext.to | gsub("^signal:"; "uuid:")), (.deliveryContext.accountId // "default")] | @tsv
+            ' 2>/dev/null | sort -u)
+            
+            local msg="⚠️ Gateway restart initiated. Please wait..."
+            
+            while IFS=$'\t' read -r agentId sessionKey channel target accountId; do
                 [[ -z "$agentId" || -z "$sessionKey" ]] && continue
                 
                 local ws="$BOBNET_ROOT/workspace/$agentId"
@@ -1617,15 +1629,14 @@ EOF
                 # Write prep BOOTSTRAP.md
                 cp "$prep_template" "$ws/BOOTSTRAP.md"
                 
-                # Set model to Haiku for this session
-                $claw gateway call session.setModel --params "{\"sessionKey\": \"$sessionKey\", \"model\": \"claude-haiku-3-5\"}" &>/dev/null || true
-                
-                # Trigger turn via sessions_send (use gateway RPC)
-                $claw gateway call sessions.send --params "{\"sessionKey\": \"$sessionKey\", \"message\": \"Restart prep triggered\"}" &>/dev/null || true
+                # Send warning to channel
+                if [[ -n "$channel" && -n "$target" ]]; then
+                    $claw message send --channel "$channel" --target "$target" --account "$accountId" --message "$msg" &>/dev/null || true
+                fi
                 
                 agents_prepped+=("$agentId")
                 echo "  ✓ $agentId"
-            done <<< "$sessions"
+            done <<< "$session_details"
             
             local expected=${#agents_prepped[@]}
             if [[ $expected -eq 0 ]]; then
