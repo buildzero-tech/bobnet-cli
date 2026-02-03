@@ -13,6 +13,50 @@ error() { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
 warn() { echo -e "${YELLOW}warn:${NC} $*" >&2; }
 success() { echo -e "${GREEN}✓${NC} $*"; }
 
+
+# Symlink ~/.openclaw/agents → BobNet agents directory
+setup_agents_symlink() {
+    local oc_agents="$CONFIG_DIR/agents"
+    local bn_agents="$BOBNET_ROOT/agents"
+    
+    if [[ -L "$oc_agents" ]]; then
+        local target=$(readlink "$oc_agents")
+        if [[ "$target" == "$bn_agents" ]]; then
+            return 0
+        fi
+    fi
+    
+    if [[ -d "$oc_agents" && ! -L "$oc_agents" ]]; then
+        local file_count=$(find "$oc_agents" -type f 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$file_count" -gt 0 ]]; then
+            warn "~/.openclaw/agents/ exists with $file_count files - run 'bobnet link setup' to migrate"
+            return 1
+        else
+            rmdir "$oc_agents" 2>/dev/null || rm -rf "$oc_agents"
+        fi
+    fi
+    
+    mkdir -p "$bn_agents"
+    ln -sf "$bn_agents" "$oc_agents"
+}
+
+check_agents_symlink() {
+    local oc_agents="$CONFIG_DIR/agents"
+    local bn_agents="$BOBNET_ROOT/agents"
+    
+    if [[ -L "$oc_agents" ]]; then
+        local target=$(readlink "$oc_agents")
+        if [[ "$target" == "$bn_agents" ]]; then
+            echo "Sessions: symlinked ✓"
+        else
+            echo "Sessions: symlinked (wrong target: $target)"
+        fi
+    elif [[ -d "$oc_agents" ]]; then
+        echo "Sessions: ~/.openclaw/agents/ (not symlinked)"
+    else
+        echo "Sessions: not configured"
+    fi
+}
 cmd_status() {
     [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { echo "Usage: bobnet status"; echo ""; echo "Show agents, repo status, and encryption state."; return 0; }
     print_agent_summary
@@ -75,6 +119,8 @@ EOF
     local bind_count=$(echo "$bindings" | jq length)
     
     $claw config set agents.defaults.workspace "$(get_workspace bob)"
+    local default_model=$(get_default_model)
+    [[ -n "$default_model" ]] && $claw config set agents.defaults.model.primary "$default_model"
     $claw config set agents.list "$list" --json
     [[ "$bind_count" -gt 0 ]] && $claw config set bindings "$bindings" --json && success "bindings: $bind_count"
     
@@ -811,6 +857,8 @@ EOF
         list+="}"
     done
     list+=']'
+    local default_model=$(get_default_model)
+    [[ -n "$default_model" ]] && $claw config set agents.defaults.model.primary "$default_model"
     $claw config set agents.list "$list" --json && success "agents + spawn permissions applied"
     
     # Apply channels (merge or replace based on --force)
@@ -1469,6 +1517,547 @@ EOF
     esac
 }
 
+cmd_restart() {
+    local mode="broadcast" delay=10 timeout=30 yes=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --graceful) mode="graceful"; shift ;;
+            --no-broadcast) mode="immediate"; shift ;;
+            --delay) delay="$2"; shift 2 ;;
+            --timeout) timeout="$2"; shift 2 ;;
+            --yes|-y) yes=true; shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet restart [--graceful|--no-broadcast] [--delay <sec>] [--timeout <sec>] [--yes]
+
+Restart OpenClaw gateway.
+
+MODES:
+  (default)        Broadcast warning to users, wait, restart
+  --graceful       Coordinate with agents: prep, wait for ready, restart, recover
+  --no-broadcast   Immediate restart (maintenance)
+
+OPTIONS:
+  --delay <sec>    Seconds to wait after broadcast (default: 10)
+  --timeout <sec>  Graceful mode: max wait for agents (default: 30)
+  --yes, -y        Skip confirmation prompt
+
+GRACEFUL FLOW:
+  1. Write prep BOOTSTRAP.md to each agent
+  2. Set agents to Haiku model, trigger turns
+  3. Agents notify users, write READY.md
+  4. Wait for READY.md files (or timeout)
+  5. Restart gateway
+  6. Write recovery BOOTSTRAP.md to each agent
+  7. Agents recover on next turn
+
+EXAMPLES:
+  bobnet restart                    # Broadcast, 10s delay, restart
+  bobnet restart --graceful         # Full agent coordination
+  bobnet restart --no-broadcast     # Immediate restart
+EOF
+                return 0 ;;
+            *) error "Unknown option: $1" ;;
+        esac
+    done
+    
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
+    [[ -z "$claw" ]] && error "openclaw not found"
+    
+    # Check gateway is running
+    if ! $claw gateway status &>/dev/null; then
+        warn "Gateway not running"
+        read -p "Start gateway? [y/N] " -r
+        [[ $REPLY =~ ^[Yy]$ ]] && $claw gateway start
+        return 0
+    fi
+    
+    # Confirmation
+    if [[ "$yes" != "true" ]]; then
+        case "$mode" in
+            graceful) echo "This will coordinate with agents and restart gracefully." ;;
+            broadcast) echo "This will broadcast a restart warning and restart in ${delay}s." ;;
+            immediate) echo "This will restart the gateway immediately (no broadcast)." ;;
+        esac
+        read -p "Continue? [y/N] " -r
+        [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled"; return 0; }
+    fi
+    
+    # Templates
+    local prep_template="$BOBNET_ROOT/core/templates/restart-prep-bootstrap.md"
+    local recovery_template="$BOBNET_ROOT/core/templates/restart-recovery-bootstrap.md"
+    
+    case "$mode" in
+        graceful)
+            # Verify templates exist
+            [[ ! -f "$prep_template" ]] && error "Missing template: $prep_template"
+            [[ ! -f "$recovery_template" ]] && error "Missing template: $recovery_template"
+            
+            echo "=== Graceful Restart ==="
+            echo ""
+            
+            # Get active sessions (active in last hour)
+            echo "--- Phase 1: Prep agents ---"
+            local sessions=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
+                .sessions[] | 
+                select(.deliveryContext != null) |
+                select(.updatedAt > (now - 3600) * 1000) |
+                "\(.agentId)|\(.key)"
+            ' 2>/dev/null | sort -u)
+            
+            local agents_prepped=()
+            while IFS='|' read -r agentId sessionKey; do
+                [[ -z "$agentId" || -z "$sessionKey" ]] && continue
+                
+                local ws="$BOBNET_ROOT/workspace/$agentId"
+                [[ ! -d "$ws" ]] && continue
+                
+                # Write prep BOOTSTRAP.md
+                cp "$prep_template" "$ws/BOOTSTRAP.md"
+                
+                # Set model to Haiku for this session
+                $claw gateway call session.setModel --params "{\"sessionKey\": \"$sessionKey\", \"model\": \"claude-haiku-3-5\"}" &>/dev/null || true
+                
+                # Trigger turn via sessions_send (use gateway RPC)
+                $claw gateway call sessions.send --params "{\"sessionKey\": \"$sessionKey\", \"message\": \"Restart prep triggered\"}" &>/dev/null || true
+                
+                agents_prepped+=("$agentId")
+                echo "  ✓ $agentId"
+            done <<< "$sessions"
+            
+            local expected=${#agents_prepped[@]}
+            if [[ $expected -eq 0 ]]; then
+                echo "  No active agents to prep"
+            else
+                success "Prepped $expected agent(s)"
+            fi
+            
+            # Wait for READY.md files
+            echo ""
+            echo "--- Phase 2: Wait for ready (${timeout}s timeout) ---"
+            local deadline=$(($(date +%s) + timeout))
+            local ready_count=0
+            
+            while [[ $(date +%s) -lt $deadline ]]; do
+                ready_count=0
+                for agent in "${agents_prepped[@]}"; do
+                    [[ -f "$BOBNET_ROOT/workspace/$agent/READY.md" ]] && ((ready_count++))
+                done
+                
+                echo -ne "\r  $ready_count/$expected ready...  "
+                
+                if [[ $ready_count -ge $expected ]]; then
+                    break
+                fi
+                sleep 2
+            done
+            echo ""
+            
+            if [[ $ready_count -ge $expected ]]; then
+                success "All agents ready"
+            else
+                warn "Timeout: $ready_count/$expected ready (proceeding anyway)"
+            fi
+            
+            # Restart gateway (goes DOWN)
+            echo ""
+            echo "--- Phase 3: Restart gateway ---"
+            $claw gateway restart &
+            local restart_pid=$!
+            
+            # Write recovery BOOTSTRAP while gateway offline
+            echo "--- Phase 4: Write recovery bootstrap ---"
+            sleep 1  # Brief pause to ensure gateway is stopping
+            
+            for agent in $(get_all_agents); do
+                local ws="$BOBNET_ROOT/workspace/$agent"
+                [[ ! -d "$ws" ]] && continue
+                cp "$recovery_template" "$ws/BOOTSTRAP.md"
+            done
+            success "Recovery bootstrap written to all agents"
+            
+            # Wait for restart to complete
+            wait $restart_pid 2>/dev/null || true
+            
+            echo ""
+            success "=== Graceful restart complete ==="
+            echo "Agents will process recovery BOOTSTRAP on next turn."
+            ;;
+            
+        broadcast)
+            echo "Broadcasting restart warning..."
+            
+            # Get active sessions with delivery context
+            local sessions=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
+                .sessions[] | 
+                select(.deliveryContext != null) |
+                select(.updatedAt > (now - 3600) * 1000) |
+                "\(.deliveryContext.channel)|\(.deliveryContext.to)|\(.deliveryContext.accountId // "default")"
+            ' 2>/dev/null | sort -u)
+            
+            local msg="⚠️ BobNet restarting in ${delay} seconds..."
+            local count=0
+            
+            while IFS='|' read -r channel to accountId; do
+                [[ -z "$channel" || -z "$to" ]] && continue
+                if $claw message send --channel "$channel" --to "$to" --account "$accountId" --message "$msg" &>/dev/null; then
+                    ((count++))
+                fi
+            done <<< "$sessions"
+            
+            if [[ $count -gt 0 ]]; then
+                success "Broadcast sent to $count session(s)"
+            else
+                echo "  No active sessions to notify"
+            fi
+            
+            # Countdown
+            echo "Restarting in ${delay}s..."
+            for ((i=delay; i>0; i--)); do
+                echo -ne "\r  ${i}s remaining...  "
+                sleep 1
+            done
+            echo ""
+            
+            # Restart
+            echo "Restarting gateway..."
+            $claw gateway restart && success "Gateway restarted" || error "Restart failed"
+            ;;
+            
+        immediate)
+            echo "Restarting gateway..."
+            $claw gateway restart && success "Gateway restarted" || error "Restart failed"
+            ;;
+    esac
+}
+
+
+cmd_upgrade() {
+    local target="openclaw" version="latest" dry_run=false yes=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --openclaw) target="openclaw"; shift ;;
+            --version) version="$2"; shift 2 ;;
+            --dry-run) dry_run=true; shift ;;
+            --yes|-y) yes=true; shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet upgrade --openclaw [--version <ver>] [--dry-run] [--yes]
+
+Upgrade OpenClaw with automatic rollback on failure.
+
+OPTIONS:
+  --openclaw         Upgrade OpenClaw (required)
+  --version <ver>    Target version (default: latest)
+  --dry-run          Show what would happen without doing it
+  --yes, -y          Skip confirmation prompt
+
+PROCESS:
+  1. Backup config
+  2. Apply config migrations (e.g., BlueBubbles allowPrivateUrl)
+  3. Stop gateway
+  4. npm install -g openclaw@VERSION
+  5. Start gateway
+  6. Run health checks (version, connectivity)
+  7. Rollback if checks fail (reinstall old version)
+
+EXAMPLE:
+  bobnet upgrade --openclaw
+  bobnet upgrade --openclaw --version 2026.2.2
+EOF
+                return 0 ;;
+            *) error "Unknown option: $1" ;;
+        esac
+    done
+    
+    [[ "$target" != "openclaw" ]] && error "Currently only --openclaw is supported"
+    
+    local VERSION_HISTORY="$CONFIG_DIR/version-history.log"
+    local LOCK_FILE="/tmp/bobnet-upgrade.lock"
+    
+    # Acquire lock (macOS compatible)
+    if [[ -f "$LOCK_FILE" ]]; then
+        local lock_pid=$(cat "$LOCK_FILE" 2>/dev/null)
+        if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+            error "Upgrade already in progress (pid: $lock_pid)"
+        fi
+        rm -f "$LOCK_FILE"
+    fi
+    echo $$ > "$LOCK_FILE"
+    trap "rm -f '$LOCK_FILE'" EXIT
+    
+    echo "=== BobNet OpenClaw Upgrade ==="
+    echo ""
+    
+    # Get current version from installed openclaw
+    local current_version=$(openclaw --version 2>/dev/null | head -1)
+    [[ -z "$current_version" ]] && error "Could not determine current OpenClaw version"
+    echo "Current version: $current_version"
+    
+    # Pre-flight: verify npm available
+    command -v npm &>/dev/null || error "npm not found"
+    
+    # Get target version
+    local target_version="$version"
+    if [[ "$version" == "latest" ]]; then
+        echo "Fetching latest version..."
+        target_version=$(npm show openclaw version 2>/dev/null)
+        [[ -z "$target_version" ]] && error "Could not fetch latest version from npm"
+    fi
+    echo "Target version:  $target_version"
+    
+    if [[ "$current_version" == "$target_version" ]]; then
+        success "Already at target version"
+        return 0
+    fi
+    
+    # Pre-flight: verify target version exists
+    echo "Verifying target version exists..."
+    npm show "openclaw@$target_version" version &>/dev/null || error "Version $target_version not found in npm registry"
+    success "Version $target_version available"
+    
+    echo ""
+    
+    # Dry run mode
+    if [[ "$dry_run" == "true" ]]; then
+        echo "=== Dry Run ==="
+        echo "Would perform:"
+        echo "  1. Backup config to ~/.openclaw/openclaw.json.pre-upgrade"
+        echo "  2. Apply config migrations (BlueBubbles allowPrivateUrl, etc.)"
+        echo "  3. Stop gateway (launchctl bootout)"
+        echo "  4. npm install -g openclaw@$target_version"
+        echo "  5. Start gateway (launchctl bootstrap)"
+        echo "  6. Poll health endpoint (up to 30s)"
+        echo "  7. Run health checks"
+        echo "  8. Rollback if checks fail (reinstall old version)"
+        return 0
+    fi
+    
+    # Confirmation
+    if [[ "$yes" != "true" ]]; then
+        echo "This will:"
+        echo "  • Stop gateway"
+        echo "  • Install OpenClaw $target_version globally"
+        echo "  • Start gateway"
+        echo "  • Rollback automatically if health checks fail"
+        echo ""
+        read -p "Continue? [y/N] " -r
+        [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled"; return 0; }
+    fi
+    
+    echo ""
+    local rollback_needed=false
+    local config="$CONFIG_DIR/$CONFIG_NAME"
+    local backup="$CONFIG_DIR/${CONFIG_NAME}.pre-upgrade"
+    
+    # Step 1: Backup config
+    echo "--- Step 1: Backup config ---"
+    cp "$config" "$backup" && success "Backed up to $backup" || error "Backup failed"
+    [[ -s "$backup" ]] || error "Backup file is empty"
+    
+    # Step 2: Apply config migrations before switching
+    echo ""
+    echo "--- Step 2: Apply config migrations ---"
+    local bb_url=$(jq -r '.channels.bluebubbles.serverUrl // ""' "$config" 2>/dev/null)
+    if [[ "$bb_url" =~ ^http://(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|localhost) ]]; then
+        echo "  BlueBubbles uses private IP: $bb_url"
+        if ! jq -e '.channels.bluebubbles.allowPrivateUrl' "$config" >/dev/null 2>&1; then
+            jq '.channels.bluebubbles.allowPrivateUrl = true' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+            success "Added BlueBubbles allowPrivateUrl=true"
+        else
+            echo "  allowPrivateUrl already set"
+        fi
+    else
+        echo "  No migrations needed"
+    fi
+    
+    # Step 3: Stop gateway before npm install
+    echo ""
+    echo "--- Step 3: Stop gateway ---"
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null || true
+    sleep 2
+    success "Gateway stopped"
+    
+    # Step 4: Install new version globally
+    echo ""
+    echo "--- Step 4: Install openclaw@$target_version ---"
+    if npm install -g "openclaw@$target_version" 2>&1; then
+        success "Installed openclaw@$target_version"
+    else
+        echo -e "${RED}npm install failed${NC}"
+        rollback_needed=true
+    fi
+    
+    # Step 5: Start gateway
+    echo ""
+    echo "--- Step 5: Start gateway ---"
+    if [[ "$rollback_needed" == "false" ]]; then
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
+    fi
+    
+    # Poll for gateway health (up to 30s)
+    echo "  Waiting for gateway..."
+    local attempts=0
+    local max_attempts=15
+    while [[ $attempts -lt $max_attempts ]]; do
+        if openclaw gateway status &>/dev/null; then
+            success "Gateway responding"
+            break
+        fi
+        sleep 2
+        ((attempts++))
+        echo -n "."
+    done
+    echo ""
+    
+    if [[ $attempts -ge $max_attempts ]]; then
+        warn "Gateway not responding after 30s"
+        rollback_needed=true
+    fi
+    
+    # Step 6: Health checks
+    local health_failures=""
+    if [[ "$rollback_needed" == "false" ]]; then
+        echo ""
+        echo "--- Step 6: Health checks ---"
+        
+        # Check 1: Version correct
+        local new_version=$(openclaw --version 2>/dev/null | head -1)
+        if [[ "$new_version" == "$target_version" ]]; then
+            success "Version verified: $new_version"
+        else
+            warn "Version mismatch: expected $target_version, got $new_version"
+            health_failures="$health_failures\n- Version mismatch: expected $target_version, got $new_version"
+            rollback_needed=true
+        fi
+        
+        # Check 2: BlueBubbles connectivity (if configured)
+        if [[ "$rollback_needed" == "false" && -n "$bb_url" ]]; then
+            local bb_password=$(jq -r '.channels.bluebubbles.password // ""' "$config" 2>/dev/null)
+            if curl -s --max-time 5 "${bb_url}/api/v1/server/info?password=${bb_password}" | jq -e '.status == 200' >/dev/null 2>&1; then
+                success "BlueBubbles reachable"
+            else
+                warn "BlueBubbles not reachable (may need manual config)"
+                health_failures="$health_failures\n- BlueBubbles not reachable at $bb_url"
+            fi
+        fi
+        
+        # Check 3: Signal health (if signal-cli running)
+        if pgrep -f signal-cli >/dev/null 2>&1; then
+            success "Signal CLI running"
+        else
+            warn "Signal CLI not detected"
+            health_failures="$health_failures\n- Signal CLI not running"
+        fi
+        
+        # Check 4: Schema vs Config delta
+        echo ""
+        echo "--- Config Delta Analysis ---"
+        local schema_agent_count=$(jq '.agents | keys | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+        local config_agent_count=$(openclaw config get agents.list 2>/dev/null | jq 'length' || echo 0)
+        local schema_binding_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+        local config_binding_count=$(openclaw config get bindings 2>/dev/null | jq 'length' || echo 0)
+        
+        if [[ "$schema_agent_count" == "$config_agent_count" ]]; then
+            success "Agents: schema=$schema_agent_count config=$config_agent_count"
+        else
+            warn "Agents drift: schema=$schema_agent_count config=$config_agent_count"
+            health_failures="$health_failures\n- Agent count drift"
+        fi
+        
+        if [[ "$schema_binding_count" == "$config_binding_count" ]]; then
+            success "Bindings: schema=$schema_binding_count config=$config_binding_count"
+        else
+            warn "Bindings drift: schema=$schema_binding_count config=$config_binding_count"
+            health_failures="$health_failures\n- Binding count drift"
+        fi
+    fi
+    
+    # Step 7: Rollback if needed
+    if [[ "$rollback_needed" == "true" ]]; then
+        echo ""
+        echo "--- Step 7: ROLLBACK ---"
+        echo -e "${RED}Upgrade failed, rolling back...${NC}"
+        
+        # Save failure report
+        local failure_report="$CONFIG_DIR/upgrade-failure-$(date +%Y%m%d_%H%M%S).log"
+        {
+            echo "=== OpenClaw Upgrade Failure Report ==="
+            echo "Date: $(date)"
+            echo "From: $current_version"
+            echo "To: $target_version"
+            echo ""
+            echo "=== Failed Health Checks ==="
+            echo -e "$health_failures"
+            echo ""
+            echo "=== Gateway Status ==="
+            openclaw gateway status 2>&1 || echo "(not responding)"
+            echo ""
+            echo "=== Recent Logs ==="
+            openclaw logs --limit 50 2>&1 || echo "(unavailable)"
+        } > "$failure_report" 2>&1
+        
+        # Rollback: reinstall previous version
+        echo "Reinstalling openclaw@$current_version..."
+        if npm install -g "openclaw@$current_version" 2>&1; then
+            success "Reinstalled openclaw@$current_version"
+        else
+            echo -e "${RED}Rollback npm install failed!${NC}"
+        fi
+        
+        # Restore config
+        cp "$backup" "$config" && success "Restored config backup"
+        
+        # Start gateway with old version
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
+        sleep 3
+        
+        # Verify rollback
+        local rolled_version=$(openclaw --version 2>/dev/null | head -1)
+        if [[ "$rolled_version" == "$current_version" ]]; then
+            success "Rolled back to $current_version"
+        else
+            echo -e "${RED}Rollback may have failed. Manual recovery:${NC}"
+            echo "  npm install -g openclaw@$current_version"
+            echo "  cp $backup $config"
+            echo "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist"
+        fi
+        
+        echo ""
+        echo "Failure report: $failure_report"
+        return 1
+    fi
+    
+    # Success!
+    echo ""
+    success "=== Upgrade complete: $current_version → $target_version ==="
+    
+    # Record in version history
+    echo "$(date -Iseconds): $current_version → $target_version (success)" >> "$VERSION_HISTORY"
+    
+    # Save success report
+    local success_report="$CONFIG_DIR/upgrade-success-$(date +%Y%m%d_%H%M%S).log"
+    {
+        echo "=== OpenClaw Upgrade Success Report ==="
+        echo "Date: $(date)"
+        echo "From: $current_version"
+        echo "To: $target_version"
+        echo ""
+        echo "=== Config Changes ==="
+        diff <(jq -S . "$backup" 2>/dev/null) <(jq -S . "$config" 2>/dev/null) || echo "(no changes)"
+    } > "$success_report" 2>&1
+    
+    echo ""
+    echo "Report: $success_report"
+    echo "History: $VERSION_HISTORY"
+    echo ""
+    echo "Rollback (if needed):"
+    echo "  npm install -g openclaw@$current_version"
+    echo "  cp $backup $config"
+    echo "  launchctl kickstart -k gui/\$(id -u)/ai.openclaw.gateway"
+}
+
+
 cmd_help() {
     cat <<EOF
 BobNet CLI v$BOBNET_CLI_VERSION
@@ -1495,6 +2084,8 @@ COMMANDS:
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
   update              Update CLI to latest version
+  restart             Restart gateway with broadcast warning
+  upgrade             Upgrade OpenClaw with rollback support
 
 Run 'bobnet <command> --help' for details.
 EOF
@@ -1520,6 +2111,8 @@ bobnet_main() {
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
         update) cmd_update ;;
+        restart) shift; cmd_restart "$@" ;;
+        upgrade) shift; cmd_upgrade "$@" ;;
         help|--help|-h) cmd_help ;;
         --version) echo "bobnet v$BOBNET_CLI_VERSION" ;;
         *) error "Unknown command: $1" ;;
