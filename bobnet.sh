@@ -37,6 +37,8 @@ This will:
   • Apply spawn permissions (subagents.allowAgents)
   • Apply bindings from schema
   • Apply channel configs from schema
+  • Link agent directories (symlinks from ~/.openclaw/agents/ to BobNet)
+  • Back up any existing OpenClaw data before linking
   • Run validation
 
 Run 'openclaw gateway restart' after to apply changes.
@@ -102,6 +104,10 @@ EOF
         mv "$oc_main_ad" "$bn_main_ad" && success "agentDir: $oc_main_ad → $bn_main_ad"
     fi
     
+    # Create agent directory symlinks (with backup)
+    echo ""
+    cmd_link create
+    
     echo ""; success "BobNet installed"
     echo "  Run '$claw gateway restart' to apply"
     echo ""
@@ -120,6 +126,11 @@ Usage: bobnet uninstall [--force] [--cli]
 
 Uninstall BobNet from OpenClaw.
 
+This will:
+  • Unlink agent directories (convert symlinks to real dirs, copying from BobNet)
+  • Restore pre-BobNet config (if backup exists)
+  • Optionally move/keep/delete the BobNet repo
+
 OPTIONS:
   --force    Skip confirmation prompts
   --cli      Also remove CLI (~/.local/bin/bobnet, ~/.local/lib/bobnet/)
@@ -128,6 +139,9 @@ You will be prompted for what to do with the repo:
   [M]ove   → Move to ~/<repo-name> (visible, preserved)
   [K]eep   → Keep in ~/.bobnet/ (hidden, preserved)  
   [D]elete → Delete entirely (destructive)
+
+To restore from backup instead of copying from BobNet:
+  bobnet link unlink --restore
 EOF
                 return 0 ;;
             *) shift ;;
@@ -139,6 +153,11 @@ EOF
     local config="$CONFIG_DIR/$CONFIG_NAME"
     
     [[ "$force" == "false" ]] && { echo "This will clear BobNet from $CLI_NAME config."; read -p "Continue? [y/N]  " -r; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
+    
+    # Unlink agent directories (convert symlinks back to real dirs)
+    echo ""
+    echo "Unlinking agent directories..."
+    cmd_link unlink 2>/dev/null || true
     
     if [[ -f "${config}.pre-bobnet" ]]; then
         cp "${config}.pre-bobnet" "$config"; success "restored config backup"
@@ -851,23 +870,26 @@ cmd_validate() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --uninstall) uninstall_mode=true; shift ;;
-            -h|--help) echo "Usage: bobnet validate [--uninstall]"; return 0 ;;
+            -h|--help) echo "Usage: bobnet validate [--uninstall]"; echo ""; echo "Alias for 'bobnet sync --dry-run' (detailed state report)."; echo "Use --uninstall to verify clean uninstall state."; return 0 ;;
             *) shift ;;
         esac
     done
     
-    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
-    
-    if [[ "$uninstall_mode" == "true" ]]; then
-        echo "=== BobNet Validate (uninstall) ==="
-    else
-        echo "=== BobNet Validate ==="
+    # Default mode: delegate to sync --dry-run for detailed state report
+    if [[ "$uninstall_mode" == "false" ]]; then
+        cmd_sync --dry-run
+        return $?
     fi
+    
+    # Uninstall mode: verify config is clean
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
+    local failures=0
+    
+    echo "=== BobNet Validate (uninstall) ==="
     echo ""
     
-    if [[ "$uninstall_mode" == "true" ]]; then
-        # UNINSTALL MODE: verify config is clean
-        if [[ -n "$claw" ]]; then
+    # UNINSTALL MODE: verify config is clean
+    if [[ -n "$claw" ]]; then
             # 1. No BobNet agents in config
             local config_agents=$($claw config get agents.list 2>/dev/null | jq -r '.[].id' | sort)
             local schema_agents=$(get_all_agents | grep -v '^main$' | sort)
@@ -923,147 +945,6 @@ cmd_validate() {
                 success "Repo locked"
             fi
         fi
-    else
-        # NORMAL MODE: verify install is correct
-        if [[ -n "$claw" ]]; then
-            local config_agents=$($claw config get agents.list 2>/dev/null | jq -r '.[].id' | sort)
-            local schema_agents=$(get_all_agents | grep -v '^main$' | sort)
-            local missing=""
-            for agent in $schema_agents; do
-                echo "$config_agents" | grep -q "^${agent}$" || missing="$missing $agent"
-            done
-            if [[ -z "$missing" ]]; then
-                success "Schema agents in config ($(echo "$schema_agents" | wc -w | tr -d ' '))"
-            else
-                echo -e "${RED}✗${NC} Schema agents missing from config:$missing"
-                echo "    bobnet install"
-                ((failures++))
-            fi
-            
-            # 2. No orphan agents in config (include main in check - it's a valid schema agent)
-            local all_schema_agents=$(get_all_agents | sort)
-            local orphans=""
-            for agent in $config_agents; do
-                echo "$all_schema_agents" | grep -q "^${agent}$" || orphans="$orphans $agent"
-            done
-            if [[ -z "$orphans" ]]; then
-                success "No orphan agents in config"
-            else
-                echo -e "${RED}✗${NC} Orphan agents in config:$orphans"
-                echo "    bobnet install"
-                ((failures++))
-            fi
-        else
-            success "OpenClaw not found (config checks skipped)"
-        fi
-        
-        # 3 & 4. Agent directories exist (workspace + agents)
-        local agents_incomplete=""
-        for agent in $(get_all_agents); do
-            local ws=$(get_workspace "$agent")
-            local ad=$(get_agent_dir "$agent")
-            if [[ ! -d "$ws" || ! -d "$ad" ]]; then
-                agents_incomplete="$agents_incomplete $agent"
-            fi
-        done
-        if [[ -z "$agents_incomplete" ]]; then
-            success "Agent directories exist ($(get_all_agents | wc -w | tr -d ' '))"
-        else
-            echo -e "${RED}✗${NC} Missing directories for:$agents_incomplete"
-            for agent in $agents_incomplete; do
-                local id="$agent"
-                echo ""
-                read -p "    Add agent '$id'? [Y/n]  " -r
-                if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-                    cmd_agent add "$id"
-                else
-                    echo "    Skipped. Run manually: bobnet agent add $id"
-                    ((failures++))
-                fi
-            done
-        fi
-        
-        # 5. Binding agents valid
-        local binding_agents=$(jq -r '.bindings[].agentId' "$AGENTS_SCHEMA" 2>/dev/null)
-        local schema_agents_raw=$(get_all_agents)
-        local invalid_bindings=""
-        for agent in $binding_agents; do
-            local found=false
-            for sa in $schema_agents_raw; do
-                [[ "$sa" == "$agent" ]] && found=true && break
-            done
-            [[ "$found" == "false" ]] && invalid_bindings="$invalid_bindings $agent"
-        done
-        if [[ -z "$invalid_bindings" ]]; then
-            local bc=$(echo "$binding_agents" | wc -w | tr -d ' ')
-            success "Bindings valid ($bc)"
-        else
-            echo -e "${RED}✗${NC} Bindings reference unknown agents:$invalid_bindings"
-            for agent in $invalid_bindings; do
-                echo "    bobnet binding remove $agent"
-            done
-            ((failures++))
-        fi
-        
-        # 6. Bindings in sync
-        if [[ -n "$claw" ]]; then
-            local schema_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
-            local config_count=$($claw config get bindings 2>/dev/null | jq 'length' || echo 0)
-            if [[ "$schema_count" == "$config_count" ]]; then
-                success "Bindings in sync ($schema_count)"
-            else
-                echo -e "${RED}✗${NC} Bindings out of sync (schema: $schema_count, config: $config_count)"
-                echo "    bobnet sync"
-                ((failures++))
-            fi
-        fi
-        
-        # 7. Channel config in sync
-        if [[ -n "$claw" ]]; then
-            local channel_drift=""
-            for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
-                local schema_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
-                local live_config=$($claw config get "channels.$channel" 2>/dev/null | jq -c '.' 2>/dev/null || echo '{}')
-                for key in $(echo "$schema_config" | jq -r 'keys[]'); do
-                    local schema_val=$(echo "$schema_config" | jq -c ".$key")
-                    local live_val=$(echo "$live_config" | jq -c ".$key // null")
-                    if [[ "$schema_val" != "$live_val" ]]; then
-                        channel_drift="$channel_drift $channel.$key"
-                    fi
-                done
-            done
-            if [[ -z "$channel_drift" ]]; then
-                success "Channel config in sync"
-            else
-                echo -e "${RED}✗${NC} Channel config drift:$channel_drift"
-                echo "    bobnet sync"
-                ((failures++))
-            fi
-        fi
-        # 7. git-crypt unlocked (install mode only)
-        if command -v git-crypt &>/dev/null && [[ -d "$BOBNET_ROOT/.git" ]]; then
-            if (cd "$BOBNET_ROOT" && git-crypt status &>/dev/null); then
-                success "git-crypt unlocked"
-            else
-                echo -e "${RED}✗${NC} Repo is locked"
-                echo "    bobnet unlock"
-                ((failures++))
-            fi
-        else
-            success "git-crypt not applicable"
-        fi
-        
-        # 8. OpenClaw reachable (install mode only)
-        if [[ -n "$claw" ]]; then
-            if $claw gateway call config.get &>/dev/null; then
-                success "OpenClaw reachable"
-            else
-                echo -e "${RED}✗${NC} OpenClaw gateway not running"
-                echo "    openclaw gateway start"
-                ((failures++))
-            fi
-        fi
-    fi
     
     echo ""
     if [[ $failures -eq 0 ]]; then
@@ -1281,25 +1162,46 @@ EOF
 }
 
 cmd_link() {
+    # NOTE: Currently we symlink each agent individually:
+    #   ~/.openclaw/agents/bob -> ~/.bobnet/ultima-thule/agents/bob
+    #
+    # OpenClaw stores sessions/auth in ~/.openclaw/agents/<agent>/ regardless
+    # of the agentDir config. If OpenClaw changes to respect agentDir for
+    # sessions/auth/etc, we could simplify to a single directory symlink:
+    #   ~/.openclaw/agents -> ~/.bobnet/ultima-thule/agents
+    #
+    # That would eliminate per-agent linking entirely. Watch for this change.
+    
     local OC_AGENTS="$CONFIG_DIR/agents"
     local BN_AGENTS="$BOBNET_ROOT/agents"
     
     case "${1:-status}" in
         -h|--help|help)
             cat <<'EOF'
-Usage: bobnet link [command]
+Usage: bobnet link [command] [options]
 
 Manage symlinks from ~/.openclaw/agents/ to BobNet agents directory.
 
 COMMANDS:
   status    Show link status for all agents (default)
-  create    Create missing symlinks (migrates existing data)
+  create    Create missing symlinks (backs up existing data first)
+  unlink    Remove symlinks, restore real directories
   check     Validate all links are correct (exit 1 if issues)
+
+OPTIONS (unlink):
+  --restore   Restore from backup instead of copying from BobNet
+  --agent X   Only unlink specific agent
 
 EXAMPLES:
   bobnet link              # Show status
   bobnet link create       # Create/fix all symlinks
+  bobnet link unlink       # Remove symlinks, copy data from BobNet
+  bobnet link unlink --restore  # Restore from agents-backup/
   bobnet link check        # Validate (for CI/scripts)
+
+SAFETY:
+  'create' backs up to ~/.openclaw/agents-backup/<agent>-<timestamp>/
+  'unlink --restore' recovers from the most recent backup
 EOF
             return 0
             ;;
@@ -1361,18 +1263,56 @@ EOF
                         success "$agent: relinked (was: $target)"
                     fi
                 elif [[ -d "$oc_path" ]]; then
-                    # Migrate existing data
                     echo "  Migrating $agent..."
                     
-                    # Copy any files from OC to BN that don't exist in BN
+                    local backup_dir="$CONFIG_DIR/agents-backup"
+                    local timestamp=$(date +%Y%m%d-%H%M%S)
+                    
+                    # Always backup OpenClaw directory if it has content
+                    if [[ -n "$(ls -A "$oc_path" 2>/dev/null)" ]]; then
+                        local backup_path="$backup_dir/${agent}-oc-${timestamp}"
+                        mkdir -p "$backup_dir"
+                        cp -r "$oc_path" "$backup_path"
+                        echo "    Backed up OpenClaw: $backup_path"
+                    fi
+                    
+                    # Migrate items from OC to BN
+                    local has_conflicts=false
                     for item in "$oc_path"/*; do
                         [[ -e "$item" ]] || continue
                         local name=$(basename "$item")
+                        
                         if [[ ! -e "$bn_path/$name" ]]; then
+                            # Doesn't exist in BN - just copy
                             cp -r "$item" "$bn_path/"
                             echo "    Migrated: $name"
+                        elif [[ "$name" == "sessions" && -d "$item" && -d "$bn_path/$name" ]]; then
+                            # Sessions directory - merge individual session files
+                            local merged=0
+                            for sess in "$item"/*; do
+                                [[ -e "$sess" ]] || continue
+                                local sess_name=$(basename "$sess")
+                                if [[ ! -e "$bn_path/$name/$sess_name" ]]; then
+                                    cp -r "$sess" "$bn_path/$name/"
+                                    ((merged++))
+                                fi
+                            done
+                            echo "    Merged sessions: $merged new session(s)"
+                        else
+                            # Conflict - backup BobNet version too, keep BN
+                            has_conflicts=true
+                            if [[ ! -d "$backup_dir/${agent}-bn-${timestamp}" ]]; then
+                                mkdir -p "$backup_dir/${agent}-bn-${timestamp}"
+                            fi
+                            cp -r "$bn_path/$name" "$backup_dir/${agent}-bn-${timestamp}/"
+                            echo "    Conflict: $name (keeping BobNet, both backed up)"
                         fi
                     done
+                    
+                    if [[ "$has_conflicts" == "true" ]]; then
+                        echo "    ${YELLOW}⚠${NC} Conflicts backed up to $backup_dir/${agent}-bn-${timestamp}/"
+                        echo "      Review and merge manually if needed"
+                    fi
                     
                     # Remove OC directory and create symlink
                     rm -rf "$oc_path"
@@ -1383,6 +1323,120 @@ EOF
                     success "$agent: linked"
                 fi
             done
+            
+            echo ""
+            echo "Done. Restart gateway to apply: openclaw gateway restart"
+            ;;
+        unlink)
+            local restore=false
+            local target_agent=""
+            shift 2>/dev/null || true
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --restore|-r) restore=true; shift ;;
+                    --agent|-a) target_agent="$2"; shift 2 ;;
+                    *) error "Unknown option: $1" ;;
+                esac
+            done
+            
+            local backup_dir="$CONFIG_DIR/agents-backup"
+            
+            if [[ "$restore" == "true" ]]; then
+                # Restore from backup
+                if [[ ! -d "$backup_dir" ]]; then
+                    error "No backups found at $backup_dir"
+                fi
+                
+                echo "Available backups:"
+                local backups=()
+                for b in "$backup_dir"/*; do
+                    [[ -d "$b" ]] || continue
+                    backups+=("$b")
+                    local name=$(basename "$b")
+                    local agent="${name%-*}"  # strip timestamp
+                    echo "  $(( ${#backups[@]} )). $name"
+                done
+                
+                if [[ ${#backups[@]} -eq 0 ]]; then
+                    error "No backups found"
+                fi
+                
+                echo ""
+                read -rp "Restore which backup? [1-${#backups[@]}, or 'all' for most recent per agent]: " choice
+                
+                if [[ "$choice" == "all" ]]; then
+                    # Find most recent backup for each agent
+                    declare -A latest
+                    for b in "${backups[@]}"; do
+                        local name=$(basename "$b")
+                        local agent="${name%-*}"
+                        latest[$agent]="$b"  # later ones overwrite (sorted by timestamp)
+                    done
+                    
+                    for agent in "${!latest[@]}"; do
+                        local backup_path="${latest[$agent]}"
+                        local oc_path="$OC_AGENTS/$agent"
+                        
+                        echo "Restoring $agent from $(basename "$backup_path")..."
+                        
+                        # Remove existing (symlink or dir)
+                        if [[ -L "$oc_path" ]]; then
+                            rm "$oc_path"
+                        elif [[ -d "$oc_path" ]]; then
+                            rm -rf "$oc_path"
+                        fi
+                        
+                        cp -r "$backup_path" "$oc_path"
+                        success "$agent: restored"
+                    done
+                else
+                    local idx=$((choice - 1))
+                    if [[ $idx -lt 0 || $idx -ge ${#backups[@]} ]]; then
+                        error "Invalid choice"
+                    fi
+                    
+                    local backup_path="${backups[$idx]}"
+                    local name=$(basename "$backup_path")
+                    local agent="${name%-*}"
+                    local oc_path="$OC_AGENTS/$agent"
+                    
+                    echo "Restoring $agent from $name..."
+                    
+                    if [[ -L "$oc_path" ]]; then
+                        rm "$oc_path"
+                    elif [[ -d "$oc_path" ]]; then
+                        rm -rf "$oc_path"
+                    fi
+                    
+                    cp -r "$backup_path" "$oc_path"
+                    success "$agent: restored"
+                fi
+            else
+                # Convert symlinks to real directories (copy from BobNet)
+                echo "Unlinking agent directories..."
+                
+                for agent_dir in "$BN_AGENTS"/*/; do
+                    [[ -d "$agent_dir" ]] || continue
+                    local agent=$(basename "$agent_dir")
+                    
+                    # Skip if targeting specific agent
+                    [[ -n "$target_agent" && "$agent" != "$target_agent" ]] && continue
+                    
+                    local oc_path="$OC_AGENTS/$agent"
+                    local bn_path="$BN_AGENTS/$agent"
+                    
+                    if [[ -L "$oc_path" ]]; then
+                        echo "  Unlinking $agent..."
+                        rm "$oc_path"
+                        cp -r "$bn_path" "$oc_path"
+                        success "$agent: unlinked (copied from BobNet)"
+                    elif [[ -d "$oc_path" ]]; then
+                        echo "  $agent: already a real directory"
+                    else
+                        echo "  $agent: not found in OpenClaw"
+                    fi
+                done
+            fi
             
             echo ""
             echo "Done. Restart gateway to apply: openclaw gateway restart"
