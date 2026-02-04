@@ -1518,6 +1518,20 @@ EOF
 }
 
 cmd_restart() {
+    # Silent cooldown - prevent restart loops
+    local lockfile="/tmp/bobnet-restart.lock"
+    local cooldown=120
+    if [[ -f "$lockfile" ]]; then
+        local last=$(cat "$lockfile" 2>/dev/null || echo 0)
+        local now=$(date +%s)
+        if (( now - last < cooldown )); then
+            local remaining=$((cooldown - now + last))
+            echo "Cooldown: waiting ${remaining}s before restart..."
+            sleep "$remaining"
+        fi
+    fi
+    echo "$(date +%s)" > "$lockfile"
+    
     local mode="broadcast" delay=10 timeout=30 yes=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1676,16 +1690,71 @@ EOF
                 fi
             fi
             
-            # Restart gateway (goes DOWN)
+            # Phase 3: Schedule recovery triggers BEFORE restart
             echo ""
-            echo "--- Phase 3: Restart gateway ---"
-            $claw gateway restart &
-            local restart_pid=$!
+            echo "--- Phase 3: Schedule recovery triggers ---"
             
-            # Write recovery BOOTSTRAP while gateway offline
+            # Save session details to temp file for background process
+            local trigger_file="/tmp/bobnet-recovery-triggers-$$.txt"
+            echo "$session_details" > "$trigger_file"
+            
+            # Background process: wait for gateway, then trigger each agent
+            # Use 'at' to schedule outside the process tree (survives gateway restart)
+            local script_file="/tmp/bobnet-recovery-$$.sh"
+            local log_file="/tmp/bobnet-recovery-$$.log"
+            
+            cat > "$script_file" << RECOVERY_SCRIPT
+#!/bin/bash
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+exec > "$log_file" 2>&1
+echo "Recovery trigger started at \$(date)"
+
+# Wait for gateway to be ready (max 60s)
+for i in {1..30}; do
+    sleep 2
+    if curl -sf http://127.0.0.1:18789/health &>/dev/null; then
+        echo "Gateway ready after \$((i*2))s"
+        break
+    fi
+    echo "Waiting... attempt \$i"
+done
+
+# Send recovery trigger to each session
+msg="🔄 Gateway back online — send any message to resume."
+while IFS=\$'\\t' read -r agentId sessionKey channel target accountId; do
+    [[ -z "\$channel" || -z "\$target" ]] && continue
+    echo "Sending to \$channel/\$target..."
+    
+    # Send visible message via signal-cli HTTP API (cheaper than openclaw)
+    if [[ "\$channel" == "signal" ]]; then
+        # Extract username from target if available, fall back to openclaw
+        curl -sf -X POST http://127.0.0.1:8080/api/v1/rpc \\
+          -H "Content-Type: application/json" \\
+          -d "{\"jsonrpc\":\"2.0\",\"method\":\"send\",\"params\":{\"recipient\":[\"\${target#uuid:}\"],\"message\":\"\$msg\"},\"id\":1}" 2>&1 || \\
+        /opt/homebrew/bin/openclaw message send --channel "\$channel" --target "\$target" --account "\$accountId" --message "\$msg" 2>&1
+    else
+        /opt/homebrew/bin/openclaw message send --channel "\$channel" --target "\$target" --account "\$accountId" --message "\$msg" 2>&1
+    fi
+    
+    # Note: No external RPC to wake sessions - user message triggers recovery
+done < "$trigger_file"
+
+echo "Recovery triggers complete at \$(date)"
+rm -f "$trigger_file" "$script_file"
+RECOVERY_SCRIPT
+            chmod +x "$script_file"
+            
+            # Schedule with launchctl to run outside process tree (survives gateway restart)
+            local job_label="com.bobnet.recovery.$$"
+            launchctl submit -l "$job_label" -- "$script_file" 2>/dev/null || {
+                # Fallback if launchctl fails - try nohup
+                nohup "$script_file" </dev/null >/dev/null 2>&1 &
+            }
+            
+            success "Recovery triggers scheduled"
+            
+            # Phase 4: Write recovery BOOTSTRAP
             echo "--- Phase 4: Write recovery bootstrap ---"
-            sleep 1  # Brief pause to ensure gateway is stopping
-            
             for agent in $(get_all_agents); do
                 local ws="$BOBNET_ROOT/workspace/$agent"
                 [[ ! -d "$ws" ]] && continue
@@ -1693,12 +1762,12 @@ EOF
             done
             success "Recovery bootstrap written to all agents"
             
-            # Wait for restart to complete
-            wait $restart_pid 2>/dev/null || true
-            
+            # Phase 5: Restart gateway (will kill this script, but triggers are scheduled)
+            echo "--- Phase 5: Restart gateway ---"
             echo ""
-            success "=== Graceful restart complete ==="
-            echo "Agents will process recovery BOOTSTRAP on next turn."
+            success "=== Graceful restart initiated ==="
+            echo "Recovery triggers scheduled. Restarting gateway..."
+            $claw gateway restart
             ;;
             
         broadcast)
