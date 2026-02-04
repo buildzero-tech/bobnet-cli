@@ -1517,6 +1517,96 @@ EOF
     esac
 }
 
+cmd_int() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        cursor) cmd_int_cursor "$@" ;;
+        -h|--help|help)
+            cat <<'EOF'
+Usage: bobnet int <integration> [options]
+
+Run integrations with external tools.
+
+INTEGRATIONS:
+  cursor              Run cursor-agent CLI
+
+Run 'bobnet int <integration> --help' for details.
+EOF
+            return 0
+            ;;
+        *)
+            error "Unknown integration: $subcmd (try 'bobnet int help')"
+            ;;
+    esac
+}
+
+cmd_int_cursor() {
+    local model="opus-4.5"
+    local print_mode=false
+    local args=()
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --model) model="$2"; shift 2 ;;
+            --print) print_mode=true; shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet int cursor [options] [cursor-agent args...]
+
+Run cursor-agent CLI with BobNet defaults.
+
+OPTIONS:
+  --model <model>    Model to use (default: opus-4.5)
+  --print            Non-interactive mode (no PTY)
+
+EXAMPLES:
+  bobnet int cursor "Fix the bug in main.ts"
+  bobnet int cursor --model sonnet-4 "Explain this code"
+  bobnet int cursor --print "Generate a summary"
+
+Requires: cursor-agent (npm install -g @anthropic/cursor-agent)
+EOF
+                return 0
+                ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    
+    # Check if cursor-agent is installed
+    if ! command -v cursor-agent &>/dev/null; then
+        echo -e "${RED}error:${NC} cursor-agent not found" >&2
+        echo "" >&2
+        echo "Install with:" >&2
+        echo "  npm install -g @anthropic/cursor-agent" >&2
+        echo "" >&2
+        echo "Or with npx:" >&2
+        echo "  npx @anthropic/cursor-agent" >&2
+        return 1
+    fi
+    
+    # Build command
+    local cmd=(cursor-agent --model "$model")
+    
+    # Add print flag if specified
+    [[ "$print_mode" == "true" ]] && cmd+=(--print)
+    
+    # Add remaining args
+    [[ ${#args[@]} -gt 0 ]] && cmd+=("${args[@]}")
+    
+    # Execute cursor-agent with PTY (required even with --print flag)
+    # Use unbuffer to automatically provide PTY without agents needing pty: true
+    if command -v unbuffer &>/dev/null; then
+        unbuffer "${cmd[@]}"
+    else
+        echo -e "${YELLOW}warning:${NC} unbuffer not found - cursor-agent may hang" >&2
+        echo "Install with: brew install expect" >&2
+        echo "" >&2
+        "${cmd[@]}"
+    fi
+}
+
 cmd_restart() {
     # Silent cooldown - prevent restart loops
     local lockfile="/tmp/bobnet-restart.lock"
@@ -2167,6 +2257,7 @@ COMMANDS:
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
   memory [cmd]        Manage memory search indexes (status, rebuild)
+  int [cmd]           Run integrations (cursor)
   search [pattern]    Search session transcripts (grep)
   signal [cmd]        Signal backup/restore
   unlock [key]        Unlock git-crypt
@@ -2194,6 +2285,7 @@ bobnet_main() {
         binding) shift; cmd_binding "$@" ;;
         link) shift; cmd_link "$@" ;;
         memory) shift; cmd_memory "$@" ;;
+        int) shift; cmd_int "$@" ;;
         search) shift; cmd_search "$@" ;;
         signal) shift; cmd_signal "$@" ;;
         unlock) shift; cmd_unlock "$@" ;;
@@ -2206,3 +2298,6 @@ bobnet_main() {
         *) error "Unknown command: $1" ;;
     esac
 }
+
+# Run main function with all arguments
+bobnet_main "$@"
