@@ -1532,10 +1532,11 @@ cmd_restart() {
     fi
     echo "$(date +%s)" > "$lockfile"
     
-    local mode="broadcast" delay=10 timeout=30 yes=false
+    local mode="graceful" delay=10 timeout=30 yes=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --graceful) mode="graceful"; shift ;;
+            --broadcast) mode="broadcast"; shift ;;
+            --graceful) mode="graceful"; shift ;;  # kept for backwards compat
             --no-broadcast) mode="immediate"; shift ;;
             --delay) delay="$2"; shift 2 ;;
             --timeout) timeout="$2"; shift 2 ;;
@@ -1547,8 +1548,8 @@ Usage: bobnet restart [--graceful|--no-broadcast] [--delay <sec>] [--timeout <se
 Restart OpenClaw gateway.
 
 MODES:
-  (default)        Broadcast warning to users, wait, restart
-  --graceful       Coordinate with agents: prep, wait for ready, restart, recover
+  (default)        Graceful: prep agents, wait, restart, send recovery message
+  --broadcast      Simple: broadcast warning, wait, restart (no BOOTSTRAP.md)
   --no-broadcast   Immediate restart (maintenance)
 
 OPTIONS:
