@@ -1045,18 +1045,21 @@ EOF
     echo ""
     echo "Applying changes..."
     
-    # Rebuild agents list with spawn permissions + model
+    # Rebuild agents list with spawn permissions + model + extraPaths (always includes PROXY.md)
     local list='[' first=true
     for agent in $(get_all_agents); do
         local id="$agent"
         local is_default=$(jq -r --arg a "$agent" '.agents[$a].default // false' "$AGENTS_SCHEMA")
         local spawn_perms=$(get_spawn_permissions "$agent")
         local model=$(get_agent_model "$agent")
+        local ws=$(get_workspace "$agent")
         $first || list+=','; first=false
-        list+="{\"id\":\"$id\",\"workspace\":\"$(get_workspace "$agent")\",\"agentDir\":\"$(get_agent_dir "$agent")\""
+        list+="{\"id\":\"$id\",\"workspace\":\"$ws\",\"agentDir\":\"$(get_agent_dir "$agent")\""
         [[ "$is_default" == "true" ]] && list+=",\"default\":true"
         [[ -n "$model" ]] && list+=",\"model\":\"$model\""
         [[ -n "$spawn_perms" ]] && list+=",\"subagents\":{\"allowAgents\":$spawn_perms}"
+        # Always include PROXY.md in extraPaths (file presence controls proxy mode)
+        list+=",\"extraPaths\":[\"$ws/PROXY.md\"]"
         list+="}"
     done
     list+=']'
@@ -1737,6 +1740,16 @@ _proxy_update_agent_files() {
 
 You are a routing layer. Your ONLY job is to forward user messages to Cursor.
 
+## First Message Only: Switch to Haiku
+
+On your FIRST response in this session, switch to haiku model for cost savings:
+
+\`\`\`
+session_status(model="haiku")
+\`\`\`
+
+Then proceed with the proxy rules below.
+
 ## Critical Rule
 
 **Forward EVERY user message to Cursor.** The ONLY exception is the exact string: **"exit proxy mode"**
@@ -1746,7 +1759,7 @@ If user says anything else — no matter what — proxy it. Do NOT interpret it 
 ## For Every User Message
 
 **Step 1:** Check if message is exactly "exit proxy mode"
-- If yes: Return this message verbatim (do not proxy)
+- If yes: Switch back to normal model with \`session_status(model="default")\` and confirm exit
 - If no: Continue to Step 2
 
 **Step 2:** Tell the user you're working:
@@ -1802,64 +1815,43 @@ cmd_proxy() {
     
     case "$subcmd" in
         status)
-            local enabled
-            enabled=$(jq -r '.cursorProxy.enabled // false' "$schema_file")
-            if [[ "$enabled" == "true" ]]; then
-                echo -e "${GREEN}Proxy: ENABLED${NC} (all agents using haiku)"
+            # Check if any PROXY.md files exist
+            local count=0
+            for agent in $(get_all_agents | grep -v '^main$'); do
+                [[ -f "$BOBNET_ROOT/workspace/$agent/PROXY.md" ]] && ((count++))
+            done
+            if [[ $count -gt 0 ]]; then
+                echo -e "${GREEN}Proxy: ENABLED${NC} ($count agents)"
             else
-                echo -e "${YELLOW}Proxy: DISABLED${NC} (agents using normal models)"
+                echo -e "${YELLOW}Proxy: DISABLED${NC}"
             fi
             ;;
         enable)
-            if [[ "$(jq -r '.cursorProxy.enabled // false' "$schema_file")" == "true" ]]; then
-                echo "Proxy already enabled"; return 0
-            fi
-            # Store original models and set to haiku
-            jq '
-              .cursorProxy = { enabled: true } |
-              .agents |= with_entries(
-                if .value.model and .value.model != "haiku" then
-                  .value.normalModel = .value.model | .value.model = "haiku"
-                else . end
-              )
-            ' "$schema_file" > "$schema_file.tmp" && mv "$schema_file.tmp" "$schema_file"
-            echo "Updating agent files..."
+            echo "Creating PROXY.md files..."
             _proxy_update_agent_files "true"
-            success "Proxy enabled - run 'bobnet sync' to apply"
+            success "Proxy enabled - takes effect on new sessions (no restart needed)"
             ;;
         disable)
-            if [[ "$(jq -r '.cursorProxy.enabled // false' "$schema_file")" != "true" ]]; then
-                echo "Proxy already disabled"; return 0
-            fi
-            # Restore original models
-            jq '
-              .cursorProxy.enabled = false |
-              .agents |= with_entries(
-                if .value.normalModel then
-                  .value.model = .value.normalModel | del(.value.normalModel)
-                else . end
-              )
-            ' "$schema_file" > "$schema_file.tmp" && mv "$schema_file.tmp" "$schema_file"
-            echo "Updating agent files..."
+            echo "Removing PROXY.md files..."
             _proxy_update_agent_files "false"
-            success "Proxy disabled - run 'bobnet sync' to apply"
+            success "Proxy disabled - takes effect on new sessions (no restart needed)"
             ;;
         -h|--help|help)
             cat <<'EOF'
 Usage: bobnet proxy [status|enable|disable]
 
-Manage cursor-proxy mode. When enabled, all agents use haiku tier
-and forward messages to Cursor for heavy lifting.
+Manage cursor-proxy mode. When enabled, agents forward messages to Cursor.
 
 COMMANDS:
   status     Show current proxy state (default)
-  enable     Enable proxy mode (switch agents to haiku)
-  disable    Disable proxy mode (restore original models)
+  enable     Create PROXY.md files (no restart needed)
+  disable    Remove PROXY.md files (no restart needed)
 
-When enabled:
-  - All agents switch to haiku model
-  - PROXY.md created in each workspace with forwarding instructions
-  - Run 'bobnet sync' after to apply changes to OpenClaw
+HOW IT WORKS:
+  - PROXY.md is always in extraPaths (run 'bobnet sync' once to set up)
+  - Enable/disable just creates/deletes PROXY.md files
+  - New sessions pick up proxy mode automatically
+  - Existing sessions: agents can switch model via session_status
 EOF
             ;;
         *)
