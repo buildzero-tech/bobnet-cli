@@ -1745,7 +1745,7 @@ You are a routing layer. Do NOT process requests yourself.
 **Step 2:** Run this command:
 
 \`\`\`bash
-bobnet int cursor -c --name ${agent}-main --print --timeout 120 -m "USER_MESSAGE_HERE"
+bobnet int cursor -c --agent ${agent} --workspace ~/.bobnet/ultima-thule/workspace/${agent} --print --timeout 120 -m "USER_MESSAGE_HERE"
 \`\`\`
 
 Replace USER_MESSAGE_HERE with the user's actual message (properly escaped).
@@ -1773,7 +1773,7 @@ Replace USER_MESSAGE_HERE with the user's actual message (properly escaped).
 - Agent: ${agent}
 - Session label: ${agent}-main
 - Timeout: 120 seconds
-- Workspace: ~/.bobnet/ultima-thule
+- Workspace: ~/.bobnet/ultima-thule/workspace/${agent}
 PROXYEOF
             echo "  Created: workspace/$agent/PROXY.md"
         else
@@ -1947,6 +1947,13 @@ _cursor_resolve_session() {
     fi
 }
 
+_cursor_get_session_workspace() {
+    # Look up the workspace for a given session ID
+    local file="$1" session_id="$2"
+    [[ -f "$file" ]] || return 1
+    jq -r --arg id "$session_id" '.sessions | map(select(.id == $id)) | .[0].workspace // empty' "$file"
+}
+
 cmd_int_cursor() {
     local model="opus-4.5"
     local print_mode=false
@@ -2008,6 +2015,13 @@ EOF
         esac
     done
     
+    # Set default workspace based on agent if not explicitly provided
+    # (Check if workspace was changed from initial default)
+    if [[ "$workspace" == "$BOBNET_ROOT" ]]; then
+        # Not explicitly set via --workspace, use agent-specific default
+        workspace="$BOBNET_ROOT/workspace/$agent"
+    fi
+    
     local sessions_file=$(_cursor_sessions_file "$agent")
     
     # Handle --list
@@ -2057,6 +2071,11 @@ EOF
             echo "Run 'bobnet int cursor --list' to see available sessions" >&2
             return 1
         fi
+        # Look up the workspace where this session was created
+        local stored_workspace=$(_cursor_get_session_workspace "$sessions_file" "$session_id")
+        if [[ -n "$stored_workspace" ]]; then
+            workspace="$stored_workspace"
+        fi
         echo -e "${GREEN}Resuming session:${NC} $resume_ref → $session_id"
     elif [[ "$continue_mode" == "true" ]]; then
         session_id=$(_cursor_get_last_session "$sessions_file")
@@ -2064,6 +2083,11 @@ EOF
             echo -e "${RED}error:${NC} No previous session to continue" >&2
             echo "Run without -c to start a new session" >&2
             return 1
+        fi
+        # Look up the workspace where this session was created
+        local stored_workspace=$(_cursor_get_session_workspace "$sessions_file" "$session_id")
+        if [[ -n "$stored_workspace" ]]; then
+            workspace="$stored_workspace"
         fi
         local last_label=$(jq -r '.lastLabel // empty' "$sessions_file")
         if [[ -n "$last_label" ]]; then
@@ -2127,12 +2151,20 @@ EOF
     # Use unbuffer to automatically provide PTY without agents needing pty: true
     local exit_code=0
     if command -v unbuffer &>/dev/null; then
-        "${timeout_cmd[@]}" unbuffer "${cmd[@]}" || exit_code=$?
+        if [[ ${#timeout_cmd[@]} -gt 0 ]]; then
+            "${timeout_cmd[@]}" unbuffer "${cmd[@]}" || exit_code=$?
+        else
+            unbuffer "${cmd[@]}" || exit_code=$?
+        fi
     else
         echo -e "${YELLOW}warning:${NC} unbuffer not found - cursor-agent may hang" >&2
         echo "Install with: brew install expect" >&2
         echo "" >&2
-        "${timeout_cmd[@]}" "${cmd[@]}" || exit_code=$?
+        if [[ ${#timeout_cmd[@]} -gt 0 ]]; then
+            "${timeout_cmd[@]}" "${cmd[@]}" || exit_code=$?
+        else
+            "${cmd[@]}" || exit_code=$?
+        fi
     fi
     
     # Update lastSession on successful completion
