@@ -1,0 +1,31 @@
+#!/bin/bash
+# check-git-attribution - Monitor git attribution compliance
+
+set -euo pipefail
+
+TIMEFRAME=${1:-"24 hours ago"}
+AGENT=${GIT_AGENT:-$(basename "$PWD" | tr '[:lower:]' '[:upper:]')}
+
+echo "🔍 Git Attribution Compliance Check"
+echo "📅 Timeframe: since $TIMEFRAME"
+echo "🤖 Agent context: $AGENT"
+echo ""
+
+# Check recent commits without attribution
+unattributed=$(git log --since="$TIMEFRAME" --author="$(git config user.name)" --pretty=format:"%h %s" | grep -v "^\[.*\]" || true)
+
+if [ -n "$unattributed" ]; then
+    echo "⚠️  Unattributed commits found:"
+    echo "$unattributed"
+    echo ""
+    echo "💡 Fix with: git rebase -i and update commit messages to:"
+    echo "   [$AGENT] type(scope): description"
+    exit 1
+else
+    echo "✅ All recent commits properly attributed"
+fi
+
+# Show attribution summary
+echo ""
+echo "📊 Recent attribution summary:"
+git log --since="$TIMEFRAME" --pretty=format:"%s" | grep -o '^\[.*\]' | sort | uniq -c | sort -rn || echo "   (no attributed commits found)"

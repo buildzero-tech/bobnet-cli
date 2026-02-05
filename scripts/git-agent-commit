@@ -1,0 +1,46 @@
+#!/bin/bash
+# git-agent-commit - Easy agent-attributed commits
+# Usage: git-agent-commit "feat(ops): add deployment pipeline"
+#        git-agent-commit "fix: resolve bug" --full  # includes co-authored-by
+
+set -euo pipefail
+
+# Detect agent from workspace path
+if [[ "$PWD" == *"/workspace/homer"* ]]; then
+    AGENT="Homer"
+    EMAIL="homer@buildzero.tech"
+elif [[ "$PWD" == *"/workspace/bill"* ]]; then
+    AGENT="Bill"  
+    EMAIL="bill@buildzero.tech"
+elif [[ "$PWD" == *"/workspace/bridget"* ]]; then
+    AGENT="Bridget"
+    EMAIL="bridget@buildzero.tech"
+elif [[ "$PWD" == *"/workspace/bob"* ]]; then
+    AGENT="Bob"
+    EMAIL="bob@buildzero.tech"
+elif [[ "$PWD" == *"/workspace/guppi"* ]]; then
+    AGENT="Guppi"
+    EMAIL="guppi@buildzero.tech"
+else
+    echo "❌ Cannot detect agent from current directory: $PWD"
+    echo "💡 Run from an agent's workspace directory"
+    exit 1
+fi
+
+MESSAGE="$1"
+FULL_ATTR=${2:-}
+
+# Format the commit message
+COMMIT_MSG="[$AGENT] $MESSAGE"
+
+if [[ "$FULL_ATTR" == "--full" ]]; then
+    # Include co-authored-by
+    git commit -m "$COMMIT_MSG" -m "Co-authored-by: $AGENT <$EMAIL>"
+    echo "✅ Committed with full attribution: $AGENT"
+else
+    # Prefix only
+    git commit -m "$COMMIT_MSG"
+    echo "✅ Committed with prefix attribution: $AGENT"
+fi
+
+echo "📝 Message: $COMMIT_MSG"
