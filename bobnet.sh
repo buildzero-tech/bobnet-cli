@@ -644,6 +644,140 @@ cmd_signal() {
     signal_check_age() { command -v age &>/dev/null || error "age required. Install: sudo apt install age"; }
     signal_get_account() { local a=""; while [[ $# -gt 0 ]]; do case "$1" in --account|-a) a="$2"; shift 2 ;; *) shift ;; esac; done; [[ -z "$a" && -f "$data_dir/accounts.json" ]] && a=$(jq -r '.accounts[0].number // empty' "$data_dir/accounts.json"); [[ -z "$a" ]] && error "No account. Use --account <num>"; echo "$a"; }
     signal_get_path() { jq -r --arg n "$1" '.accounts[] | select(.number == $n) | .path' "$data_dir/accounts.json" 2>/dev/null; }
+    
+    signal_update_group() {
+        local group_id="" new_name="" new_description="" account="" force=false
+        
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --name) new_name="$2"; shift 2 ;;
+                --description) new_description="$2"; shift 2 ;;
+                --account|-a) account="$2"; shift 2 ;;
+                --force) force=true; shift ;;
+                -h|--help)
+                    cat <<'EOF'
+Usage: bobnet signal updateGroup <groupId> [options]
+
+Update Signal group name and/or description.
+
+ARGUMENTS:
+  groupId                 Signal group ID (with or without signal:group: prefix)
+
+OPTIONS:
+  --name <name>           New group name
+  --description <desc>    New group description  
+  --account <num>         Signal account (auto-detected if not specified)
+  --force                 Skip confirmation prompt
+
+EXAMPLES:
+  bobnet signal updateGroup P1JlWw/uMmoc/h8JWVXYqT/2UsRQ+Llfal6xSNojcJ8= --name "OpenClaw"
+  bobnet signal updateGroup signal:group:P1J... --description "OpenClaw development"
+
+WARNING: This temporarily stops OpenClaw Signal daemon (gateway restart required).
+EOF
+                    return 0 ;;
+                -*) error "Unknown option: $1" ;;
+                *) 
+                    if [[ -z "$group_id" ]]; then
+                        group_id="$1"
+                    else
+                        error "Unexpected argument: $1"
+                    fi
+                    shift ;;
+            esac
+        done
+        
+        # Validate required arguments
+        [[ -z "$group_id" ]] && error "Usage: bobnet signal updateGroup <groupId> [--name <name>] [--description <desc>]"
+        [[ -z "$new_name" && -z "$new_description" ]] && error "At least one of --name or --description is required"
+        
+        # Normalize group ID (remove signal:group: prefix if present)
+        group_id="${group_id#signal:group:}"
+        
+        # Check dependencies
+        command -v signal-cli &>/dev/null || error "signal-cli not found. Install with: brew install signal-cli"
+        
+        # Get Signal account
+        if [[ -z "$account" ]]; then
+            account=$(signal_get_account)
+        fi
+        
+        # Check if OpenClaw is running
+        local claw=""
+        command -v openclaw &>/dev/null && claw="openclaw"
+        [[ -z "$claw" ]] && error "openclaw not found"
+        
+        local gateway_running=false
+        if $claw gateway call config.get &>/dev/null; then
+            gateway_running=true
+        fi
+        
+        echo "=== Signal Group Update ==="
+        echo "Group: $group_id"
+        [[ -n "$new_name" ]] && echo "Name: → \"$new_name\""
+        [[ -n "$new_description" ]] && echo "Description: → \"$new_description\""
+        echo "Account: $account"
+        echo ""
+        
+        if [[ "$gateway_running" == "true" ]]; then
+            echo "⚠️  WARNING: This will temporarily restart OpenClaw gateway"
+            echo "   Signal daemon must be stopped to avoid file lock conflicts"
+            echo ""
+        fi
+        
+        if [[ "$force" != "true" ]]; then
+            read -p "Continue? [y/N] " -r
+            [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled"; return 0; }
+        fi
+        
+        # Step 1: Disable Signal autoStart if gateway is running
+        local autostart_was_enabled=false
+        if [[ "$gateway_running" == "true" ]]; then
+            echo "Checking Signal autoStart setting..."
+            local current_autostart=$($claw config get channels.signal.autoStart 2>/dev/null || echo "null")
+            if [[ "$current_autostart" == "true" ]]; then
+                autostart_was_enabled=true
+                echo "Disabling Signal autoStart..."
+                $claw config set channels.signal.autoStart false
+                success "Signal autoStart disabled"
+            fi
+            
+            echo "Restarting gateway to stop Signal daemon..."
+            $claw gateway restart --no-broadcast --yes >/dev/null 2>&1 && success "Gateway restarted" || warn "Gateway restart may have failed"
+            
+            # Brief pause for daemon to fully stop
+            sleep 3
+        fi
+        
+        # Step 2: Run signal-cli updateGroup command
+        echo "Updating Signal group..."
+        local cmd=("signal-cli" "-a" "$account" "updateGroup")
+        cmd+=("-g" "$group_id")
+        [[ -n "$new_name" ]] && cmd+=(--name "$new_name")
+        [[ -n "$new_description" ]] && cmd+=(--description "$new_description")
+        
+        echo "Running: ${cmd[*]}"
+        if "${cmd[@]}"; then
+            success "Group updated successfully"
+        else
+            error "signal-cli command failed"
+        fi
+        
+        # Step 3: Re-enable autoStart and restart gateway if needed
+        if [[ "$gateway_running" == "true" ]]; then
+            if [[ "$autostart_was_enabled" == "true" ]]; then
+                echo "Re-enabling Signal autoStart..."
+                $claw config set channels.signal.autoStart true
+                success "Signal autoStart re-enabled"
+            fi
+            
+            echo "Restarting gateway to resume normal operation..."
+            $claw gateway restart --no-broadcast --yes >/dev/null 2>&1 && success "Gateway restarted - Signal daemon restored" || warn "Gateway restart may have failed"
+        fi
+        
+        echo ""
+        success "Signal group update complete"
+    }
     case "$subcmd" in
         backup)
             signal_check_age; local acct=$(signal_get_account "$@") path=$(signal_get_path "$acct")
@@ -661,10 +795,32 @@ cmd_signal() {
             echo "Restoring from $file..."
             [[ "$force" == "false" ]] && { read -p "Overwrite signal-cli data? [y/N]  " -r; [[ ! $REPLY =~ ^[Yy]$ ]] && return 0; }
             mkdir -p "$data_dir" && age -d "$file" | tar -C "$data_dir" -xzf - && success "restored" ;;
+        updateGroup)
+            signal_update_group "$@" ;;
         list|ls)
             echo "=== Signal Backups ($backup_dir) ==="; [[ ! -d "$backup_dir" ]] && { echo "(none)"; return 0; }
             ls -1t "$backup_dir"/*.tar.age 2>/dev/null | head -10 | while read -r f; do echo "  $(basename "$f") ($(du -h "$f" | cut -f1))"; done ;;
-        -h|--help|help|"") echo "Usage: bobnet signal [backup|restore|list] [--account <num>]" ;;
+        -h|--help|help|"")
+            cat <<'EOF'
+Usage: bobnet signal <command> [options]
+
+Signal-cli integration with OpenClaw daemon coordination.
+
+COMMANDS:
+  backup [--account <num>]      Backup Signal data (encrypted)
+  restore [--file <path>]       Restore Signal data from backup
+  list                          List available backups
+  updateGroup <groupId>         Update group name/description
+
+EXAMPLES:
+  bobnet signal backup                                    # Backup Signal data
+  bobnet signal updateGroup <groupId> --name "OpenClaw"   # Update group name
+  bobnet signal updateGroup <groupId> --description "..."  # Update description
+  bobnet signal updateGroup <groupId> --name "..." --description "..."  # Both
+
+updateGroup coordinates with OpenClaw gateway (stops daemon, runs command, restarts).
+EOF
+            ;;
         *) error "Unknown: $subcmd" ;;
     esac
 }
