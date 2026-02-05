@@ -2676,6 +2676,114 @@ EOF
 }
 
 
+cmd_git() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        commit)
+            local script="$(dirname "${BASH_SOURCE[0]}")/scripts/git-agent-commit"
+            [[ -x "$script" ]] || error "git-agent-commit script not found: $script"
+            "$script" "$@"
+            ;;
+        check|check-attribution)
+            local script="$(dirname "${BASH_SOURCE[0]}")/scripts/check-git-attribution"
+            [[ -x "$script" ]] || error "check-git-attribution script not found: $script"
+            "$script" "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet git <command> [options]
+
+Git attribution commands for BobNet agents.
+
+COMMANDS:
+  commit <message> [--full]    Commit with agent attribution
+  check [timeframe]            Check recent commits for proper attribution
+
+EXAMPLES:
+  bobnet git commit "feat(ops): add deployment pipeline"
+  bobnet git commit "fix: resolve auth bug" --full
+  bobnet git check "24 hours ago"
+  bobnet git check "1 week ago"
+
+The commit command auto-detects the agent from your current workspace directory.
+EOF
+            ;;
+        *)
+            error "Unknown git command: $subcmd (try 'bobnet git help')"
+            ;;
+    esac
+}
+
+cmd_groupname() {
+    local agent="${1:-}" status="${2:-}"
+    
+    case "${1:-help}" in
+        -h|--help|help)
+            cat <<'EOF'
+Usage: bobnet groupname <agent> [status]
+
+Update Signal group name to show agent activity status.
+
+ARGUMENTS:
+  agent               Agent name (bill, homer, bridget, etc.)
+  status              Status suffix to show (optional)
+
+EXAMPLES:
+  bobnet groupname homer "working..."     # Sets "Homer [working...]"
+  bobnet groupname homer "→ Bill"         # Sets "Homer [→ Bill]" 
+  bobnet groupname homer "exec..."        # Sets "Homer [exec...]"
+  bobnet groupname homer                  # Resets to "Homer"
+
+STATUS PATTERNS:
+  working...          Agent is executing tasks
+  exec...             Running shell commands
+  thinking...         Processing complex request
+  → AgentName         Spawning sub-agent
+  idle                Waiting for input
+
+Zero message quota cost - only triggers system announcements.
+EOF
+            return 0
+            ;;
+        *)
+            [[ -z "$agent" ]] && error "Usage: bobnet groupname <agent> [status]"
+            ;;
+    esac
+    
+    # Get agent's Signal group info from schema
+    local group_id=$(jq -r --arg a "$agent" '.bindings[] | select(.agentId == $a and .channel == "signal" and .groupId) | .groupId' "$AGENTS_SCHEMA" 2>/dev/null)
+    local base_name=$(jq -r --arg a "$agent" '.bindings[] | select(.agentId == $a and .channel == "signal" and .groupId) | .groupName' "$AGENTS_SCHEMA" 2>/dev/null)
+    
+    [[ -z "$group_id" || "$group_id" == "null" ]] && error "No Signal group found for agent '$agent'"
+    [[ -z "$base_name" || "$base_name" == "null" ]] && base_name="$agent"
+    
+    # Get Signal account from schema
+    local account=$(jq -r '.channels.signal.account // "+14439063521"' "$AGENTS_SCHEMA" 2>/dev/null)
+    
+    # Build new group name
+    local new_name="$base_name"
+    if [[ -n "$status" ]]; then
+        new_name="$base_name [$status]"
+    fi
+    
+    echo "Updating group name: $new_name"
+    
+    # Update via signal-cli JSON-RPC API
+    local rpc_response=$(curl -s -X POST -H "Content-Type: application/json" \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"updateGroup\",\"params\":{\"account\":\"$account\",\"groupId\":\"$group_id\",\"name\":\"$new_name\"}}" \
+        http://127.0.0.1:8080/api/v1/rpc 2>/dev/null)
+    
+    local rpc_error=$(echo "$rpc_response" | jq -r '.error.message // empty' 2>/dev/null)
+    
+    if [[ -n "$rpc_error" ]]; then
+        error "Signal API error: $rpc_error"
+    else
+        success "Group name updated to: $new_name"
+    fi
+}
+
 cmd_help() {
     cat <<EOF
 BobNet CLI v$BOBNET_CLI_VERSION
@@ -2696,10 +2804,12 @@ COMMANDS:
   link [cmd]          Manage agent directory symlinks
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
+  groupname <agent>   Update Signal group name for status
   memory [cmd]        Manage memory search indexes (status, rebuild)
   groups [cmd]        Manage group registry (list, get, add, remove)
   int [cmd]           Run integrations (cursor)
   search [pattern]    Search session transcripts (grep)
+  git [cmd]           Git attribution commands (commit, check)
   signal [cmd]        Signal backup/restore
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
@@ -2725,10 +2835,12 @@ bobnet_main() {
         scope) shift; cmd_scope "$@" ;;
         binding) shift; cmd_binding "$@" ;;
         link) shift; cmd_link "$@" ;;
+        groupname) shift; cmd_groupname "$@" ;;
         memory) shift; cmd_memory "$@" ;;
         groups) shift; cmd_groups "$@" ;;
         int) shift; cmd_int "$@" ;;
         search) shift; cmd_search "$@" ;;
+        git) shift; cmd_git "$@" ;;
         signal) shift; cmd_signal "$@" ;;
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
