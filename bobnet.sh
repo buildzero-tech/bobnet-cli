@@ -57,6 +57,46 @@ check_agents_symlink() {
         echo "Sessions: not configured"
     fi
 }
+
+# Global variables and utilities
+BOBNET_ROOT="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
+AGENTS_SCHEMA="$BOBNET_ROOT/config/agents-schema.json"
+
+# Schema helper functions
+get_all_agents() {
+    jq -r '.agents | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""
+}
+
+get_all_scopes() {
+    jq -r '.scopes | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""
+}
+
+get_agents_by_scope() {
+    local scope="$1"
+    jq -r --arg s "$scope" '.agents | to_entries[] | select(.value.scope == $s) | .key' "$AGENTS_SCHEMA" 2>/dev/null || echo ""
+}
+
+get_workspace() {
+    local agent="$1"
+    echo "$BOBNET_ROOT/workspace/$agent"
+}
+
+get_agent_dir() {
+    local agent="$1"
+    echo "$BOBNET_ROOT/agents/$agent"
+}
+
+get_spawn_permissions() {
+    local agent="$1"
+    local perms=$(jq -c --arg a "$agent" '.agents[$a].spawnPermissions // []' "$AGENTS_SCHEMA" 2>/dev/null)
+    [[ "$perms" == "[]" || "$perms" == "null" ]] && echo "" || echo "$perms"
+}
+
+get_agent_model() {
+    local agent="$1"
+    jq -r --arg a "$agent" '.agents[$a].model // empty' "$AGENTS_SCHEMA" 2>/dev/null
+}
+
 cmd_status() {
     [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { echo "Usage: bobnet status"; echo ""; echo "Show agents, repo status, and encryption state."; return 0; }
     print_agent_summary
@@ -1607,6 +1647,250 @@ EOF
     fi
 }
 
+cmd_groups() {
+    local subcmd="${1:-list}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        list|ls)
+            local agent_filter=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --agent) agent_filter="$2"; shift 2 ;;
+                    -h|--help)
+                        echo "Usage: bobnet groups list [--agent <agent>]"
+                        echo ""
+                        echo "List known groups for agents."
+                        echo ""
+                        echo "OPTIONS:"
+                        echo "  --agent <id>    Show groups for specific agent only"
+                        return 0 ;;
+                    *) shift ;;
+                esac
+            done
+            
+            echo "=== BobNet Group Registry ==="
+            echo ""
+            
+            local found_any=false
+            for agent in $(get_all_agents); do
+                # Skip if agent filter specified and doesn't match
+                if [[ -n "$agent_filter" && "$agent" != "$agent_filter" ]]; then
+                    continue
+                fi
+                
+                # Check if agent has knownGroups
+                local groups_obj=$(jq -c --arg a "$agent" '.agents[$a].knownGroups // {}' "$AGENTS_SCHEMA" 2>/dev/null)
+                local group_count=$(echo "$groups_obj" | jq 'length' 2>/dev/null || echo 0)
+                
+                if [[ "$group_count" -gt 0 ]]; then
+                    found_any=true
+                    echo "[$agent] ($group_count groups)"
+                    echo "$groups_obj" | jq -r 'to_entries[] | "  \(.key) → \(.value)"' 2>/dev/null
+                    echo ""
+                fi
+            done
+            
+            if [[ "$found_any" == "false" ]]; then
+                if [[ -n "$agent_filter" ]]; then
+                    echo "Agent '$agent_filter' has no known groups"
+                else
+                    echo "No groups defined in schema"
+                    echo ""
+                    echo "Add groups with:"
+                    echo "  bobnet groups add <name> <group-id> [--agent <agent>]"
+                fi
+            fi
+            ;;
+        get)
+            local group_name="${1:-}" agent_filter=""
+            shift 2>/dev/null || true
+            
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --agent) agent_filter="$2"; shift 2 ;;
+                    -h|--help)
+                        echo "Usage: bobnet groups get <name> [--agent <agent>]"
+                        echo ""
+                        echo "Get group ID for named group."
+                        echo ""
+                        echo "OPTIONS:"
+                        echo "  --agent <id>    Look in specific agent's groups only"
+                        return 0 ;;
+                    *) shift ;;
+                esac
+            done
+            
+            [[ -z "$group_name" ]] && error "Usage: bobnet groups get <name> [--agent <agent>]"
+            
+            local found=false
+            for agent in $(get_all_agents); do
+                # Skip if agent filter specified and doesn't match
+                if [[ -n "$agent_filter" && "$agent" != "$agent_filter" ]]; then
+                    continue
+                fi
+                
+                # Look for group in this agent's knownGroups
+                local group_id=$(jq -r --arg a "$agent" --arg g "$group_name" '.agents[$a].knownGroups[$g] // empty' "$AGENTS_SCHEMA" 2>/dev/null)
+                
+                if [[ -n "$group_id" ]]; then
+                    echo "$group_id"
+                    found=true
+                    break
+                fi
+            done
+            
+            if [[ "$found" == "false" ]]; then
+                if [[ -n "$agent_filter" ]]; then
+                    error "Group '$group_name' not found for agent '$agent_filter'"
+                else
+                    error "Group '$group_name' not found in any agent's known groups"
+                fi
+            fi
+            ;;
+        add)
+            local group_name="${1:-}" group_id="${2:-}" target_agent="bob"
+            shift 2 2>/dev/null || true
+            
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --agent) target_agent="$2"; shift 2 ;;
+                    -h|--help)
+                        echo "Usage: bobnet groups add <name> <group-id> [--agent <agent>]"
+                        echo ""
+                        echo "Add a named group to an agent's known groups."
+                        echo ""
+                        echo "OPTIONS:"
+                        echo "  --agent <id>    Target agent (default: bob)"
+                        echo ""
+                        echo "EXAMPLES:"
+                        echo "  bobnet groups add openclaw signal:group:P1J..."
+                        echo "  bobnet groups add bill-rd signal:group:6qv... --agent bill"
+                        return 0 ;;
+                    *) shift ;;
+                esac
+            done
+            
+            [[ -z "$group_name" ]] && error "Usage: bobnet groups add <name> <group-id> [--agent <agent>]"
+            [[ -z "$group_id" ]] && error "Usage: bobnet groups add <name> <group-id> [--agent <agent>]"
+            
+            # Validate agent exists
+            if ! jq -e --arg a "$target_agent" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+                error "Agent '$target_agent' not found in schema"
+            fi
+            
+            # Add group to agent's knownGroups
+            local temp_file="${AGENTS_SCHEMA}.tmp"
+            jq --arg a "$target_agent" --arg g "$group_name" --arg id "$group_id" '
+                .agents[$a].knownGroups = ((.agents[$a].knownGroups // {}) | .[$g] = $id)
+            ' "$AGENTS_SCHEMA" > "$temp_file"
+            
+            if [[ $? -eq 0 ]]; then
+                mv "$temp_file" "$AGENTS_SCHEMA"
+                success "Added '$group_name' to $target_agent's known groups"
+            else
+                rm -f "$temp_file"
+                error "Failed to update schema"
+            fi
+            ;;
+        remove|rm)
+            local group_name="${1:-}" target_agent=""
+            shift 2>/dev/null || true
+            
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --agent) target_agent="$2"; shift 2 ;;
+                    -h|--help)
+                        echo "Usage: bobnet groups remove <name> [--agent <agent>]"
+                        echo ""
+                        echo "Remove a named group from agent's known groups."
+                        echo ""
+                        echo "OPTIONS:"
+                        echo "  --agent <id>    Target specific agent (default: search all)"
+                        return 0 ;;
+                    *) shift ;;
+                esac
+            done
+            
+            [[ -z "$group_name" ]] && error "Usage: bobnet groups remove <name> [--agent <agent>]"
+            
+            local removed=false
+            local agents_to_check
+            
+            if [[ -n "$target_agent" ]]; then
+                # Check if agent exists
+                if ! jq -e --arg a "$target_agent" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+                    error "Agent '$target_agent' not found in schema"
+                fi
+                agents_to_check="$target_agent"
+            else
+                agents_to_check=$(get_all_agents)
+            fi
+            
+            for agent in $agents_to_check; do
+                # Check if group exists for this agent
+                local group_id=$(jq -r --arg a "$agent" --arg g "$group_name" '.agents[$a].knownGroups[$g] // empty' "$AGENTS_SCHEMA" 2>/dev/null)
+                
+                if [[ -n "$group_id" ]]; then
+                    # Remove the group
+                    local temp_file="${AGENTS_SCHEMA}.tmp"
+                    jq --arg a "$agent" --arg g "$group_name" '
+                        .agents[$a].knownGroups = ((.agents[$a].knownGroups // {}) | del(.[$g]))
+                    ' "$AGENTS_SCHEMA" > "$temp_file"
+                    
+                    if [[ $? -eq 0 ]]; then
+                        mv "$temp_file" "$AGENTS_SCHEMA"
+                        success "Removed '$group_name' from $agent's known groups"
+                        removed=true
+                    else
+                        rm -f "$temp_file"
+                        error "Failed to update schema for agent '$agent'"
+                    fi
+                fi
+            done
+            
+            if [[ "$removed" == "false" ]]; then
+                if [[ -n "$target_agent" ]]; then
+                    error "Group '$group_name' not found for agent '$target_agent'"
+                else
+                    error "Group '$group_name' not found in any agent's known groups"
+                fi
+            fi
+            ;;
+        -h|--help|help)
+            cat <<'EOF'
+Usage: bobnet groups <command> [options]
+
+Manage group registry for agent notifications.
+
+COMMANDS:
+  list [--agent <id>]           List known groups
+  get <name> [--agent <id>]     Get group ID by name
+  add <name> <id> [--agent <id>] Add named group
+  remove <name> [--agent <id>]  Remove named group
+
+EXAMPLES:
+  bobnet groups list                               # All groups
+  bobnet groups list --agent bob                   # Bob's groups only
+  bobnet groups get openclaw                       # Get openclaw group ID
+  bobnet groups add openclaw signal:group:P1J...   # Add to bob (default)
+  bobnet groups add bill-rd signal:group:6qv... --agent bill
+  bobnet groups remove old-group                   # Remove from all agents
+
+AGENT USAGE:
+  # Instead of hardcoding IDs:
+  groupId=$(bobnet groups get openclaw)
+  message send --target "$groupId" --message "Update"
+
+Groups are stored in agents-schema.json and sync with 'bobnet sync'.
+EOF
+            ;;
+        *)
+            error "Unknown groups command: $subcmd (try 'bobnet groups help')"
+            ;;
+    esac
+}
+
 cmd_restart() {
     # Silent cooldown - prevent restart loops
     local lockfile="/tmp/bobnet-restart.lock"
@@ -2257,6 +2541,7 @@ COMMANDS:
   scope [cmd]         List scopes and agents
   binding [cmd]       Manage agent bindings
   memory [cmd]        Manage memory search indexes (status, rebuild)
+  groups [cmd]        Manage group registry (list, get, add, remove)
   int [cmd]           Run integrations (cursor)
   search [pattern]    Search session transcripts (grep)
   signal [cmd]        Signal backup/restore
@@ -2285,6 +2570,7 @@ bobnet_main() {
         binding) shift; cmd_binding "$@" ;;
         link) shift; cmd_link "$@" ;;
         memory) shift; cmd_memory "$@" ;;
+        groups) shift; cmd_groups "$@" ;;
         int) shift; cmd_int "$@" ;;
         search) shift; cmd_search "$@" ;;
         signal) shift; cmd_signal "$@" ;;
