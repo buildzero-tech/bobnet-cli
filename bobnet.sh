@@ -1720,6 +1720,144 @@ EOF
     esac
 }
 
+#######################################
+# Proxy Management - Toggle models to haiku for cursor-proxy mode
+#######################################
+_proxy_update_agent_files() {
+    local enabled="$1"
+    local schema_file="$BOBNET_ROOT/config/agents-schema.json"
+    local agents=$(jq -r '.agents | keys[]' "$schema_file" | grep -v '^main$')
+    
+    for agent in $agents; do
+        local proxy_file="$BOBNET_ROOT/workspace/$agent/PROXY.md"
+        
+        if [[ "$enabled" == "true" ]]; then
+            cat > "$proxy_file" << PROXYEOF
+# PROXY MODE — Forward to Cursor
+
+You are a routing layer. Do NOT process requests yourself.
+
+## For Every User Message
+
+**Step 1:** Tell the user you're working:
+> "Thinking with Cursor..."
+
+**Step 2:** Run this command:
+
+\`\`\`bash
+bobnet int cursor -c --name ${agent}-main --print --timeout 120 -m "USER_MESSAGE_HERE"
+\`\`\`
+
+Replace USER_MESSAGE_HERE with the user's actual message (properly escaped).
+
+**Step 3:** Return Cursor's response verbatim.
+
+## Timeout Handling
+
+| Exit Code | Meaning | Response |
+|-----------|---------|----------|
+| 0 | Success | Return Cursor's output |
+| 124 | Timeout | "Cursor timed out. Let me try briefly..." then respond yourself |
+| Other | Error | "Cursor unavailable." then respond yourself briefly |
+
+## Rules
+
+- ALWAYS send "Thinking with Cursor..." BEFORE the exec command
+- Do NOT add other commentary
+- Do NOT spawn sub-agents
+- Do NOT use other tools (except exec for the cursor command)
+- On fallback, keep your response brief (you're Haiku)
+
+## Your Context
+
+- Agent: ${agent}
+- Session label: ${agent}-main
+- Timeout: 120 seconds
+- Workspace: ~/.bobnet/ultima-thule
+PROXYEOF
+            echo "  Created: workspace/$agent/PROXY.md"
+        else
+            if [[ -f "$proxy_file" ]]; then
+                rm "$proxy_file"
+                echo "  Removed: workspace/$agent/PROXY.md"
+            fi
+        fi
+    done
+}
+
+cmd_proxy() {
+    local subcmd="${1:-status}"
+    local schema_file="$BOBNET_ROOT/config/agents-schema.json"
+    
+    case "$subcmd" in
+        status)
+            local enabled
+            enabled=$(jq -r '.cursorProxy.enabled // false' "$schema_file")
+            if [[ "$enabled" == "true" ]]; then
+                echo -e "${GREEN}Proxy: ENABLED${NC} (all agents using haiku)"
+            else
+                echo -e "${YELLOW}Proxy: DISABLED${NC} (agents using normal models)"
+            fi
+            ;;
+        enable)
+            if [[ "$(jq -r '.cursorProxy.enabled // false' "$schema_file")" == "true" ]]; then
+                echo "Proxy already enabled"; return 0
+            fi
+            # Store original models and set to haiku
+            jq '
+              .cursorProxy = { enabled: true } |
+              .agents |= with_entries(
+                if .value.model and .value.model != "haiku" then
+                  .value.normalModel = .value.model | .value.model = "haiku"
+                else . end
+              )
+            ' "$schema_file" > "$schema_file.tmp" && mv "$schema_file.tmp" "$schema_file"
+            echo "Updating agent files..."
+            _proxy_update_agent_files "true"
+            success "Proxy enabled - run 'bobnet sync' to apply"
+            ;;
+        disable)
+            if [[ "$(jq -r '.cursorProxy.enabled // false' "$schema_file")" != "true" ]]; then
+                echo "Proxy already disabled"; return 0
+            fi
+            # Restore original models
+            jq '
+              .cursorProxy.enabled = false |
+              .agents |= with_entries(
+                if .value.normalModel then
+                  .value.model = .value.normalModel | del(.value.normalModel)
+                else . end
+              )
+            ' "$schema_file" > "$schema_file.tmp" && mv "$schema_file.tmp" "$schema_file"
+            echo "Updating agent files..."
+            _proxy_update_agent_files "false"
+            success "Proxy disabled - run 'bobnet sync' to apply"
+            ;;
+        -h|--help|help)
+            cat <<'EOF'
+Usage: bobnet proxy [status|enable|disable]
+
+Manage cursor-proxy mode. When enabled, all agents use haiku tier
+and forward messages to Cursor for heavy lifting.
+
+COMMANDS:
+  status     Show current proxy state (default)
+  enable     Enable proxy mode (switch agents to haiku)
+  disable    Disable proxy mode (restore original models)
+
+When enabled:
+  - All agents switch to haiku model
+  - PROXY.md created in each workspace with forwarding instructions
+  - Run 'bobnet sync' after to apply changes to OpenClaw
+EOF
+            ;;
+        *)
+            echo "Usage: bobnet proxy [status|enable|disable]"
+            return 1
+            ;;
+    esac
+}
+
 cmd_int() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -1816,6 +1954,8 @@ cmd_int_cursor() {
     local resume_ref=""
     local list_mode=false
     local session_name=""
+    local message=""
+    local timeout_secs=""
     local agent="bob"
     local workspace="$BOBNET_ROOT"
     local args=()
@@ -1828,6 +1968,8 @@ cmd_int_cursor() {
             --resume) resume_ref="$2"; shift 2 ;;
             --list) list_mode=true; shift ;;
             --name) session_name="$2"; shift 2 ;;
+            -m|--message) message="$2"; shift 2 ;;
+            --timeout) timeout_secs="$2"; shift 2 ;;
             --agent) agent="$2"; shift 2 ;;
             --workspace) workspace="$2"; shift 2 ;;
             -h|--help)
@@ -1840,6 +1982,8 @@ OPTIONS:
   --model <model>    Model to use (default: opus-4.5)
   --print            Non-interactive mode (no PTY)
   --name <label>     Label for new session (for easy resume)
+  -m, --message <text>  Message to send (alternative to trailing args)
+  --timeout <secs>   Timeout in seconds (exit 124 on timeout)
   -c, --continue     Continue last session for this agent
   --resume <ref>     Resume session by UUID or label
   --list             List tracked sessions for this agent
@@ -1952,24 +2096,43 @@ EOF
     # Add print flag if specified
     [[ "$print_mode" == "true" ]] && cmd+=(--print)
     
-    # Add remaining args (the prompt)
-    [[ ${#args[@]} -gt 0 ]] && cmd+=("${args[@]}")
+    # Combine --message with trailing args
+    local prompt=""
+    [[ -n "$message" ]] && prompt="$message"
+    if [[ ${#args[@]} -gt 0 ]]; then
+        [[ -n "$prompt" ]] && prompt="$prompt "
+        prompt="${prompt}${args[*]}"
+    fi
+    [[ -n "$prompt" ]] && cmd+=("$prompt")
     
     # Save session before running (in case of crash)
     if [[ "$is_new_session" == "true" && -n "$session_id" ]]; then
-        local preview="${args[*]:-interactive}"
+        local preview="${prompt:-interactive}"
         _cursor_save_session "$sessions_file" "$session_id" "$workspace" "$preview" "$session_name"
+    fi
+    
+    # Build timeout command if specified
+    local timeout_cmd=()
+    if [[ -n "$timeout_secs" ]]; then
+        if command -v gtimeout &>/dev/null; then
+            timeout_cmd=(gtimeout --signal=TERM "$timeout_secs")
+        elif command -v timeout &>/dev/null; then
+            timeout_cmd=(timeout --signal=TERM "$timeout_secs")
+        else
+            echo -e "${YELLOW}warning:${NC} timeout command not found (brew install coreutils)" >&2
+        fi
     fi
     
     # Execute cursor-agent with PTY (required even with --print flag)
     # Use unbuffer to automatically provide PTY without agents needing pty: true
+    local exit_code=0
     if command -v unbuffer &>/dev/null; then
-        unbuffer "${cmd[@]}"
+        "${timeout_cmd[@]}" unbuffer "${cmd[@]}" || exit_code=$?
     else
         echo -e "${YELLOW}warning:${NC} unbuffer not found - cursor-agent may hang" >&2
         echo "Install with: brew install expect" >&2
         echo "" >&2
-        "${cmd[@]}"
+        "${timeout_cmd[@]}" "${cmd[@]}" || exit_code=$?
     fi
     
     # Update lastSession on successful completion
@@ -1977,6 +2140,8 @@ EOF
         local tmp=$(mktemp)
         jq --arg id "$session_id" '.lastSession = $id' "$sessions_file" > "$tmp" && mv "$tmp" "$sessions_file"
     fi
+    
+    return $exit_code
 }
 
 cmd_groups() {
@@ -3021,6 +3186,7 @@ bobnet_main() {
         memory) shift; cmd_memory "$@" ;;
         groups) shift; cmd_groups "$@" ;;
         int) shift; cmd_int "$@" ;;
+        proxy) shift; cmd_proxy "$@" ;;
         search) shift; cmd_search "$@" ;;
         git) shift; cmd_git "$@" ;;
         signal) shift; cmd_signal "$@" ;;
