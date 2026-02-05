@@ -1745,29 +1745,116 @@ EOF
     esac
 }
 
+# Cursor session tracking helpers
+_cursor_sessions_file() {
+    local agent="${1:-bob}"
+    echo "$BOBNET_ROOT/agents/$agent/cursor-sessions.json"
+}
+
+_cursor_init_sessions() {
+    local file="$1"
+    [[ -f "$file" ]] && return 0
+    mkdir -p "$(dirname "$file")"
+    echo '{"lastSession":null,"lastLabel":null,"sessions":[]}' > "$file"
+}
+
+_cursor_save_session() {
+    local file="$1" session_id="$2" workspace="$3" preview="$4" label="${5:-}"
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local escaped_preview=$(echo "$preview" | head -c 80 | jq -Rs '.')
+    
+    _cursor_init_sessions "$file"
+    
+    local tmp=$(mktemp)
+    if [[ -n "$label" ]]; then
+        jq --arg id "$session_id" \
+           --arg ts "$timestamp" \
+           --arg ws "$workspace" \
+           --arg lbl "$label" \
+           --argjson preview "$escaped_preview" \
+           '.lastSession = $id | .lastLabel = $lbl | .sessions += [{id: $id, name: $lbl, created: $ts, workspace: $ws, preview: $preview}]' \
+           "$file" > "$tmp" && mv "$tmp" "$file"
+    else
+        jq --arg id "$session_id" \
+           --arg ts "$timestamp" \
+           --arg ws "$workspace" \
+           --argjson preview "$escaped_preview" \
+           '.lastSession = $id | .lastLabel = null | .sessions += [{id: $id, created: $ts, workspace: $ws, preview: $preview}]' \
+           "$file" > "$tmp" && mv "$tmp" "$file"
+    fi
+}
+
+_cursor_get_last_session() {
+    local file="$1"
+    [[ -f "$file" ]] || return 1
+    jq -r '.lastSession // empty' "$file"
+}
+
+_cursor_get_session_by_label() {
+    local file="$1" label="$2"
+    [[ -f "$file" ]] || return 1
+    jq -r --arg lbl "$label" '.sessions | map(select(.name == $lbl)) | last | .id // empty' "$file"
+}
+
+_cursor_resolve_session() {
+    # Resolve a session ref (UUID or label) to UUID
+    local file="$1" ref="$2"
+    [[ -f "$file" ]] || return 1
+    # If it looks like a UUID, return as-is
+    if [[ "$ref" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        echo "$ref"
+    else
+        # Try to find by label
+        _cursor_get_session_by_label "$file" "$ref"
+    fi
+}
+
 cmd_int_cursor() {
     local model="opus-4.5"
     local print_mode=false
+    local continue_mode=false
+    local resume_ref=""
+    local list_mode=false
+    local session_name=""
+    local agent="bob"
+    local workspace="$BOBNET_ROOT"
     local args=()
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --model) model="$2"; shift 2 ;;
             --print) print_mode=true; shift ;;
+            -c|--continue) continue_mode=true; shift ;;
+            --resume) resume_ref="$2"; shift 2 ;;
+            --list) list_mode=true; shift ;;
+            --name) session_name="$2"; shift 2 ;;
+            --agent) agent="$2"; shift 2 ;;
+            --workspace) workspace="$2"; shift 2 ;;
             -h|--help)
                 cat <<'EOF'
-Usage: bobnet int cursor [options] [cursor-agent args...]
+Usage: bobnet int cursor [options] [prompt...]
 
-Run cursor-agent CLI with BobNet defaults.
+Run cursor-agent CLI with BobNet session tracking.
 
 OPTIONS:
   --model <model>    Model to use (default: opus-4.5)
   --print            Non-interactive mode (no PTY)
+  --name <label>     Label for new session (for easy resume)
+  -c, --continue     Continue last session for this agent
+  --resume <ref>     Resume session by UUID or label
+  --list             List tracked sessions for this agent
+  --agent <name>     Agent context (default: bob)
+  --workspace <path> Workspace directory (default: $BOBNET_ROOT)
 
 EXAMPLES:
   bobnet int cursor "Fix the bug in main.ts"
-  bobnet int cursor --model sonnet-4 "Explain this code"
-  bobnet int cursor --print "Generate a summary"
+  bobnet int cursor --name auth-refactor "Analyze auth module"
+  bobnet int cursor -c "Now add tests for that"
+  bobnet int cursor --resume auth-refactor "Pick up where we left off"
+  bobnet int cursor --list
+
+Sessions are tracked per-agent in:
+  ~/.bobnet/ultima-thule/agents/<agent>/cursor-sessions.json
 
 Requires: cursor-agent (npm install -g @anthropic/cursor-agent)
 EOF
@@ -1776,6 +1863,31 @@ EOF
             *) args+=("$1"); shift ;;
         esac
     done
+    
+    local sessions_file=$(_cursor_sessions_file "$agent")
+    
+    # Handle --list
+    if [[ "$list_mode" == "true" ]]; then
+        if [[ ! -f "$sessions_file" ]]; then
+            echo "No cursor sessions tracked for agent: $agent"
+            return 0
+        fi
+        echo "Cursor sessions for $agent:"
+        echo ""
+        # Show label (or truncated UUID) + timestamp + preview
+        jq -r '.sessions | reverse | .[:10][] | 
+            (if .name then .name else .id[0:12] + "..." end) as $label |
+            "  \($label | . + " " * (20 - length) | .[0:20])  \(.created[0:10])  \(.preview[0:40])"' "$sessions_file"
+        echo ""
+        local last=$(_cursor_get_last_session "$sessions_file")
+        local last_label=$(jq -r '.lastLabel // empty' "$sessions_file")
+        if [[ -n "$last_label" ]]; then
+            echo "Last session: $last_label ($last)"
+        elif [[ -n "$last" ]]; then
+            echo "Last session: $last"
+        fi
+        return 0
+    fi
     
     # Check if cursor-agent is installed
     if ! command -v cursor-agent &>/dev/null; then
@@ -1789,14 +1901,65 @@ EOF
         return 1
     fi
     
+    # Determine session ID
+    local session_id=""
+    local is_new_session=false
+    
+    if [[ -n "$resume_ref" ]]; then
+        # Resolve label or UUID to session ID
+        session_id=$(_cursor_resolve_session "$sessions_file" "$resume_ref")
+        if [[ -z "$session_id" ]]; then
+            echo -e "${RED}error:${NC} Session not found: $resume_ref" >&2
+            echo "Run 'bobnet int cursor --list' to see available sessions" >&2
+            return 1
+        fi
+        echo -e "${GREEN}Resuming session:${NC} $resume_ref → $session_id"
+    elif [[ "$continue_mode" == "true" ]]; then
+        session_id=$(_cursor_get_last_session "$sessions_file")
+        if [[ -z "$session_id" ]]; then
+            echo -e "${RED}error:${NC} No previous session to continue" >&2
+            echo "Run without -c to start a new session" >&2
+            return 1
+        fi
+        local last_label=$(jq -r '.lastLabel // empty' "$sessions_file")
+        if [[ -n "$last_label" ]]; then
+            echo -e "${GREEN}Continuing:${NC} $last_label"
+        else
+            echo -e "${GREEN}Continuing session:${NC} $session_id"
+        fi
+    else
+        # Create new session
+        session_id=$(cursor-agent create-chat 2>/dev/null)
+        if [[ -z "$session_id" || "$session_id" == *"ERROR"* ]]; then
+            echo -e "${YELLOW}warning:${NC} Could not create tracked session, running without tracking" >&2
+            session_id=""
+        else
+            is_new_session=true
+            if [[ -n "$session_name" ]]; then
+                echo -e "${GREEN}New session:${NC} $session_name ($session_id)"
+            else
+                echo -e "${GREEN}New session:${NC} $session_id"
+            fi
+        fi
+    fi
+    
     # Build command
-    local cmd=(cursor-agent --model "$model")
+    local cmd=(cursor-agent --model "$model" --workspace "$workspace")
+    
+    # Add resume if we have a session
+    [[ -n "$session_id" ]] && cmd+=(--resume "$session_id")
     
     # Add print flag if specified
     [[ "$print_mode" == "true" ]] && cmd+=(--print)
     
-    # Add remaining args
+    # Add remaining args (the prompt)
     [[ ${#args[@]} -gt 0 ]] && cmd+=("${args[@]}")
+    
+    # Save session before running (in case of crash)
+    if [[ "$is_new_session" == "true" && -n "$session_id" ]]; then
+        local preview="${args[*]:-interactive}"
+        _cursor_save_session "$sessions_file" "$session_id" "$workspace" "$preview" "$session_name"
+    fi
     
     # Execute cursor-agent with PTY (required even with --print flag)
     # Use unbuffer to automatically provide PTY without agents needing pty: true
@@ -1807,6 +1970,12 @@ EOF
         echo "Install with: brew install expect" >&2
         echo "" >&2
         "${cmd[@]}"
+    fi
+    
+    # Update lastSession on successful completion
+    if [[ -n "$session_id" && -f "$sessions_file" ]]; then
+        local tmp=$(mktemp)
+        jq --arg id "$session_id" '.lastSession = $id' "$sessions_file" > "$tmp" && mv "$tmp" "$sessions_file"
     fi
 }
 
@@ -2866,5 +3035,5 @@ bobnet_main() {
     esac
 }
 
-# Run main function with all arguments
-bobnet_main "$@"
+# Note: bobnet_main is called by the wrapper script (~/.local/bin/bobnet)
+# Do not call it here to avoid double execution
