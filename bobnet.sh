@@ -1971,10 +1971,12 @@ cmd_int_cursor() {
     local continue_mode=false
     local resume_ref=""
     local list_mode=false
+    local list_all=false
+    local proxy_mode=false
     local session_name=""
     local message=""
     local timeout_secs=""
-    local agent="bob"
+    local agent="${OPENCLAW_AGENT_ID:-bob}"
     local workspace="$BOBNET_ROOT"
     local args=()
     
@@ -1984,7 +1986,10 @@ cmd_int_cursor() {
             --print) print_mode=true; shift ;;
             -c|--continue) continue_mode=true; shift ;;
             --resume) resume_ref="$2"; shift 2 ;;
+            --attach) resume_ref="$2"; shift 2 ;;
             --list) list_mode=true; shift ;;
+            --all) list_all=true; shift ;;
+            --proxy) proxy_mode=true; shift ;;
             --name) session_name="$2"; shift 2 ;;
             -m|--message) message="$2"; shift 2 ;;
             --timeout) timeout_secs="$2"; shift 2 ;;
@@ -2002,18 +2007,23 @@ OPTIONS:
   --name <label>     Label for new session (for easy resume)
   -m, --message <text>  Message to send (alternative to trailing args)
   --timeout <secs>   Timeout in seconds (exit 124 on timeout)
+  --proxy            Proxy mode: --print + -c + --timeout 120 (for PROXY.md)
   -c, --continue     Continue last session for this agent
   --resume <ref>     Resume session by UUID or label
+  --attach <ref>     Alias for --resume
   --list             List tracked sessions for this agent
-  --agent <name>     Agent context (default: bob)
-  --workspace <path> Workspace directory (default: $BOBNET_ROOT)
+  --all              With --list, show sessions for all agents
+  --agent <name>     Agent context (default: $OPENCLAW_AGENT_ID or bob)
+  --workspace <path> Workspace directory (default: $BOBNET_ROOT/workspace/<agent>)
 
 EXAMPLES:
   bobnet int cursor "Fix the bug in main.ts"
   bobnet int cursor --name auth-refactor "Analyze auth module"
   bobnet int cursor -c "Now add tests for that"
-  bobnet int cursor --resume auth-refactor "Pick up where we left off"
+  bobnet int cursor --attach auth-refactor "Pick up where we left off"
+  bobnet int cursor --proxy -m "review the auth module"
   bobnet int cursor --list
+  bobnet int cursor --list --all
 
 Sessions are tracked per-agent in:
   ~/.bobnet/ultima-thule/agents/<agent>/cursor-sessions.json
@@ -2026,6 +2036,13 @@ EOF
         esac
     done
     
+    # Proxy mode sets sensible defaults for forwarding
+    if [[ "$proxy_mode" == "true" ]]; then
+        print_mode=true
+        continue_mode=true
+        [[ -z "$timeout_secs" ]] && timeout_secs="120"
+    fi
+    
     # Set default workspace based on agent if not explicitly provided
     # (Check if workspace was changed from initial default)
     if [[ "$workspace" == "$BOBNET_ROOT" ]]; then
@@ -2037,6 +2054,26 @@ EOF
     
     # Handle --list
     if [[ "$list_mode" == "true" ]]; then
+        if [[ "$list_all" == "true" ]]; then
+            # List sessions for all agents
+            echo "Cursor sessions (all agents):"
+            echo ""
+            for agent_dir in "$BOBNET_ROOT/agents"/*; do
+                [[ -d "$agent_dir" ]] || continue
+                local a=$(basename "$agent_dir")
+                local sf=$(_cursor_sessions_file "$a")
+                [[ -f "$sf" ]] || continue
+                local count=$(jq '.sessions | length' "$sf")
+                [[ "$count" == "0" ]] && continue
+                echo "[$a] ($count sessions)"
+                jq -r '.sessions | reverse | .[:5][] | 
+                    (if .name then .name else .id[0:12] + "..." end) as $label |
+                    "  \($label | . + " " * (20 - length) | .[0:20])  \(.created[0:10])  \(.preview[0:40])"' "$sf"
+                echo ""
+            done
+            return 0
+        fi
+        
         if [[ ! -f "$sessions_file" ]]; then
             echo "No cursor sessions tracked for agent: $agent"
             return 0
