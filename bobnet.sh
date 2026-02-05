@@ -88,8 +88,15 @@ get_agent_dir() {
 
 get_spawn_permissions() {
     local agent="$1"
-    local perms=$(jq -c --arg a "$agent" '.agents[$a].spawnPermissions // []' "$AGENTS_SCHEMA" 2>/dev/null)
-    [[ "$perms" == "[]" || "$perms" == "null" ]] && echo "" || echo "$perms"
+    # Check for agent-specific permissions first, then fall back to default
+    local agent_perms=$(jq -c --arg a "$agent" '.spawning.permissions[$a]' "$AGENTS_SCHEMA" 2>/dev/null)
+    if [[ "$agent_perms" != "null" && "$agent_perms" != "[]" ]]; then
+        echo "$agent_perms"
+    else
+        # Use default permissions
+        local default_perms=$(jq -c '.spawning.permissions.default' "$AGENTS_SCHEMA" 2>/dev/null)
+        [[ "$default_perms" == "null" || "$default_perms" == "[]" ]] && echo "" || echo "$default_perms"
+    fi
 }
 
 get_agent_model() {
