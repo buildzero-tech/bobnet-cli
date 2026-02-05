@@ -2770,9 +2770,15 @@ EOF
     
     echo "Updating group name: $new_name"
     
-    # Update via signal-cli JSON-RPC API
+    # Update via signal-cli JSON-RPC API (use jq -c for compact JSON with proper escaping)
+    local rpc_payload=$(jq -nc \
+        --arg account "$account" \
+        --arg groupId "$group_id" \
+        --arg name "$new_name" \
+        '{jsonrpc:"2.0",id:1,method:"updateGroup",params:{$account,$groupId,name:$name}}')
+    
     local rpc_response=$(curl -s -X POST -H "Content-Type: application/json" \
-        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"updateGroup\",\"params\":{\"account\":\"$account\",\"groupId\":\"$group_id\",\"name\":\"$new_name\"}}" \
+        -d "$rpc_payload" \
         http://127.0.0.1:8080/api/v1/rpc 2>/dev/null)
     
     local rpc_error=$(echo "$rpc_response" | jq -r '.error.message // empty' 2>/dev/null)
