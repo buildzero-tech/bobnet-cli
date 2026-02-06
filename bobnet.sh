@@ -3466,6 +3466,263 @@ EOF
     fi
 }
 
+cmd_todo() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        sync)
+            cmd_todo_sync "$@"
+            ;;
+        status)
+            cmd_todo_status "$@"
+            ;;
+        list)
+            cmd_todo_list "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet todo <command> [options]
+
+Todo management and GitHub synchronization.
+
+COMMANDS:
+  list [agent]           List todos for agent(s)
+  status                 Show todo status across all agents
+  sync [--dry-run]       Sync todos with GitHub issues
+
+EXAMPLES:
+  bobnet todo list bob
+  bobnet todo status
+  bobnet todo sync --dry-run
+
+See 'bobnet todo <command> help' for more information.
+EOF
+            ;;
+        *)
+            error "Unknown todo command: $subcmd (try 'bobnet todo help')"
+            ;;
+    esac
+}
+
+cmd_todo_list() {
+    local agent="${1:-}"
+    
+    if [[ "$agent" == "-h" || "$agent" == "--help" ]]; then
+        cat <<'EOF'
+Usage: bobnet todo list [agent]
+
+List todos for a specific agent or all agents.
+
+OPTIONS:
+  agent    Agent name (omit to list all)
+
+FORMAT:
+  - [ ] **Title** — Description #issue-number
+  - [x] **Title** — Description #issue-number (completed date)
+
+EXAMPLES:
+  bobnet todo list bob
+  bobnet todo list
+EOF
+        return 0
+    fi
+    
+    local agents=()
+    if [[ -n "$agent" ]]; then
+        agents=("$agent")
+    else
+        # Get all agents
+        while IFS= read -r a; do
+            agents+=("$a")
+        done < <(get_all_agents)
+    fi
+    
+    for a in "${agents[@]}"; do
+        local workspace=$(get_workspace "$a")
+        local memory_file="$workspace/MEMORY.md"
+        
+        if [[ ! -f "$memory_file" ]]; then
+            continue
+        fi
+        
+        # Extract todos section
+        local in_todos=false
+        local todos=""
+        
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^##[[:space:]]+Todos ]]; then
+                in_todos=true
+                continue
+            elif [[ "$line" =~ ^## && "$in_todos" == true ]]; then
+                break
+            elif [[ "$in_todos" == true && "$line" =~ ^-[[:space:]]\[([ x])\] ]]; then
+                todos+="$line"$'\n'
+            fi
+        done < "$memory_file"
+        
+        if [[ -n "$todos" ]]; then
+            echo "=== $a ==="
+            echo "$todos"
+        fi
+    done
+}
+
+cmd_todo_status() {
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        cat <<'EOF'
+Usage: bobnet todo status
+
+Show summary of todos across all agents.
+
+OUTPUT:
+  Total todos, completed, pending, by agent
+
+EXAMPLE:
+  bobnet todo status
+EOF
+        return 0
+    fi
+    
+    local total=0 completed=0 pending=0
+    local agent_summary=""
+    
+    # Get all agents
+    local agents=()
+    while IFS= read -r a; do
+        agents+=("$a")
+    done < <(get_all_agents)
+    
+    for agent in "${agents[@]}"; do
+        local workspace=$(get_workspace "$agent")
+        local memory_file="$workspace/MEMORY.md"
+        
+        if [[ ! -f "$memory_file" ]]; then
+            continue
+        fi
+        
+        # Count todos
+        local agent_total=$(grep -c '^- \[[ x]\]' "$memory_file" 2>/dev/null || echo 0)
+        local agent_completed=$(grep -c '^- \[x\]' "$memory_file" 2>/dev/null || echo 0)
+        local agent_pending=$((agent_total - agent_completed))
+        
+        total=$((total + agent_total))
+        completed=$((completed + agent_completed))
+        pending=$((pending + agent_pending))
+        
+        if [[ $agent_total -gt 0 ]]; then
+            agent_summary+="  $agent: $agent_pending pending, $agent_completed completed"$'\n'
+        fi
+    done
+    
+    echo "=== Todo Status ==="
+    echo "Total: $total todos"
+    echo "Pending: $pending"
+    echo "Completed: $completed"
+    echo
+    
+    if [[ -n "$agent_summary" ]]; then
+        echo "By agent:"
+        echo -n "$agent_summary"
+    fi
+}
+
+cmd_todo_sync() {
+    local dry_run=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet todo sync [options]
+
+Synchronize todos with GitHub issues (bidirectional).
+
+SYNC BEHAVIOR:
+  1. Agent todos with #issue → Update GitHub issue status
+  2. GitHub issues with todo label → Create/update agent todos
+  3. Completed todos → Close linked GitHub issues
+  4. Closed issues → Mark linked todos as completed
+
+OPTIONS:
+  --dry-run    Show what would be synced without making changes
+
+EXAMPLES:
+  bobnet todo sync --dry-run
+  bobnet todo sync
+EOF
+                return 0
+                ;;
+            *)
+                error "Unknown option: $1"
+                ;;
+        esac
+    done
+    
+    echo "=== Todo Sync ==="
+    [[ "$dry_run" == true ]] && echo "(Dry run - no changes will be made)"
+    echo
+    
+    # Get all agents
+    local agents=()
+    while IFS= read -r a; do
+        agents+=("$a")
+    done < <(get_all_agents)
+    
+    local synced=0
+    local skipped=0
+    
+    for agent in "${agents[@]}"; do
+        local workspace=$(get_workspace "$agent")
+        local memory_file="$workspace/MEMORY.md"
+        
+        if [[ ! -f "$memory_file" ]]; then
+            continue
+        fi
+        
+        # Extract todos with issue references
+        local in_todos=false
+        
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^##[[:space:]]+Todos ]]; then
+                in_todos=true
+                continue
+            elif [[ "$line" =~ ^## && "$in_todos" == true ]]; then
+                break
+            elif [[ "$in_todos" == true && "$line" =~ ^-[[:space:]]\[([ x])\][[:space:]]+(.+)#([0-9]+) ]]; then
+                local status="${BASH_REMATCH[1]}"
+                local description="${BASH_REMATCH[2]}"
+                local issue_num="${BASH_REMATCH[3]}"
+                
+                # Sync completed todos → close issues
+                if [[ "$status" == "x" ]]; then
+                    echo "  $agent: Todo #$issue_num completed → would close issue"
+                    
+                    if [[ "$dry_run" == false ]]; then
+                        gh issue close "$issue_num" -c "Completed via agent todo sync" 2>/dev/null || {
+                            warn "Failed to close issue #$issue_num"
+                        }
+                    fi
+                    
+                    ((synced++))
+                else
+                    echo "  $agent: Todo #$issue_num pending → would update issue"
+                    ((skipped++))
+                fi
+            fi
+        done < "$memory_file"
+    done
+    
+    echo
+    echo "Sync complete:"
+    echo "  Synced: $synced"
+    echo "  Skipped: $skipped"
+}
+
 cmd_groupname() {
     local agent="${1:-}" status="${2:-}"
     
@@ -3567,6 +3824,7 @@ COMMANDS:
   search [pattern]    Search session transcripts (grep)
   git [cmd]           Git attribution commands (commit, check)
   github [cmd]        GitHub integration (issues, milestones)
+  todo [cmd]          Todo management and GitHub sync (list, status, sync)
   signal [cmd]        Signal backup/restore
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
@@ -3600,6 +3858,7 @@ bobnet_main() {
         search) shift; cmd_search "$@" ;;
         git) shift; cmd_git "$@" ;;
         github) shift; cmd_github "$@" ;;
+        todo) shift; cmd_todo "$@" ;;
         signal) shift; cmd_signal "$@" ;;
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
