@@ -3466,6 +3466,262 @@ EOF
     fi
 }
 
+cmd_incident() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        create)
+            cmd_incident_create "$@"
+            ;;
+        close)
+            cmd_incident_close "$@"
+            ;;
+        list)
+            cmd_incident_list "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet incident <command> [options]
+
+Incident tracking and post-mortem management.
+
+COMMANDS:
+  create <title>         Create new incident report
+  close <id>             Close incident and finalize post-mortem
+  list                   List all incidents
+
+EXAMPLES:
+  bobnet incident create "Production database down"
+  bobnet incident close 2026-02-06-db-outage
+  bobnet incident list
+
+See 'bobnet incident <command> help' for more information.
+EOF
+            ;;
+        *)
+            error "Unknown incident command: $subcmd (try 'bobnet incident help')"
+            ;;
+    esac
+}
+
+cmd_incident_create() {
+    local title=""
+    local severity="P2"
+    local impact=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --severity|-s)
+                severity="$2"
+                shift 2
+                ;;
+            --impact|-i)
+                impact="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet incident create <title> [options]
+
+Create a new incident report with structured template.
+
+OPTIONS:
+  --severity, -s <P0-P3>   Incident severity (default: P2)
+                           P0: Critical (production down)
+                           P1: High (major feature broken)
+                           P2: Medium (minor issue)
+                           P3: Low (cosmetic)
+  --impact, -i <text>      Brief impact description
+
+EXAMPLES:
+  bobnet incident create "Database connection pool exhausted" --severity P0
+  bobnet incident create "Login page slow" --severity P2 --impact "Users experiencing 5s delays"
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$title" ]]; then
+                    title="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$title" ]] && error "Incident title is required"
+    
+    # Generate incident ID (date-slug)
+    local date=$(date +%Y-%m-%d)
+    local slug=$(echo "$title" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | sed 's/[^a-z0-9-]//g' | cut -c1-40)
+    local incident_id="$date-$slug"
+    
+    # Create incidents directory in collective
+    local incidents_dir="$BOBNET_ROOT/collective/incidents"
+    mkdir -p "$incidents_dir"
+    
+    local incident_file="$incidents_dir/$incident_id.md"
+    
+    if [[ -f "$incident_file" ]]; then
+        error "Incident already exists: $incident_id"
+    fi
+    
+    # Create template
+    cat > "$incident_file" <<EOF
+# Incident: $title
+
+**ID:** $incident_id  
+**Severity:** $severity  
+**Status:** Active  
+**Detected:** $(date '+%Y-%m-%d %H:%M %Z')  
+**Resolved:** *(pending)*
+
+---
+
+## Impact
+
+${impact:-*(to be filled)*}
+
+---
+
+## Timeline
+
+- **$(date '+%H:%M')** — Incident detected
+
+---
+
+## Root Cause
+
+*(to be determined)*
+
+---
+
+## Resolution
+
+*(in progress)*
+
+---
+
+## Follow-up Actions
+
+- [ ] *(action items to be added)*
+
+---
+
+## Lessons Learned
+
+*(to be added in post-mortem)*
+
+---
+
+*Incident report created by \`bobnet incident create\`*
+EOF
+    
+    success "Incident created: $incident_id"
+    echo "  File: $incident_file"
+    echo "  Edit with: vim $incident_file"
+    echo "  Close with: bobnet incident close $incident_id"
+}
+
+cmd_incident_close() {
+    local incident_id="$1"
+    
+    if [[ "$incident_id" == "-h" || "$incident_id" == "--help" || -z "$incident_id" ]]; then
+        cat <<'EOF'
+Usage: bobnet incident close <incident-id>
+
+Close an incident and mark it as resolved.
+
+Updates:
+- Status: Active → Resolved
+- Resolved timestamp
+- Prompts for final notes
+
+EXAMPLES:
+  bobnet incident close 2026-02-06-db-outage
+EOF
+        return 0
+    fi
+    
+    local incidents_dir="$BOBNET_ROOT/collective/incidents"
+    local incident_file="$incidents_dir/$incident_id.md"
+    
+    if [[ ! -f "$incident_file" ]]; then
+        error "Incident not found: $incident_id"
+    fi
+    
+    # Check if already closed
+    if grep -q "\*\*Status:\*\* Resolved" "$incident_file"; then
+        warn "Incident already resolved: $incident_id"
+        return 0
+    fi
+    
+    # Update status and resolved time
+    local resolved_time=$(date '+%Y-%m-%d %H:%M %Z')
+    
+    # Use sed to update in place
+    sed -i '' \
+        -e "s/\*\*Status:\*\* Active/**Status:** Resolved/" \
+        -e "s/\*\*Resolved:\*\* \*(pending)\*/**Resolved:** $resolved_time/" \
+        "$incident_file"
+    
+    success "Incident closed: $incident_id"
+    echo "  Resolved: $resolved_time"
+    echo "  File: $incident_file"
+    echo
+    echo "Remember to complete:"
+    echo "  - Root cause analysis"
+    echo "  - Follow-up actions"
+    echo "  - Lessons learned"
+}
+
+cmd_incident_list() {
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        cat <<'EOF'
+Usage: bobnet incident list
+
+List all incidents (active and resolved).
+
+OUTPUT:
+  Incidents sorted by date, with status and severity
+
+EXAMPLE:
+  bobnet incident list
+EOF
+        return 0
+    fi
+    
+    local incidents_dir="$BOBNET_ROOT/collective/incidents"
+    
+    if [[ ! -d "$incidents_dir" ]]; then
+        echo "No incidents directory found."
+        return 0
+    fi
+    
+    local incidents=$(ls -1 "$incidents_dir"/*.md 2>/dev/null || echo "")
+    
+    if [[ -z "$incidents" ]]; then
+        echo "No incidents found."
+        return 0
+    fi
+    
+    echo "=== Incidents ==="
+    echo
+    
+    for incident_file in $incidents; do
+        local incident_id=$(basename "$incident_file" .md)
+        local title=$(grep "^# Incident:" "$incident_file" | sed 's/^# Incident: //')
+        local status=$(grep "\*\*Status:\*\*" "$incident_file" | sed 's/.*\*\*Status:\*\* //')
+        local severity=$(grep "\*\*Severity:\*\*" "$incident_file" | sed 's/.*\*\*Severity:\*\* //')
+        
+        echo "[$status] $incident_id ($severity)"
+        echo "  $title"
+        echo
+    done
+}
+
 cmd_docs() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -4071,6 +4327,7 @@ COMMANDS:
   github [cmd]        GitHub integration (issues, milestones)
   todo [cmd]          Todo management and GitHub sync (list, status, sync)
   docs [cmd]          Documentation generation (roadmap, changelog, release)
+  incident [cmd]      Incident tracking and post-mortems (create, close, list)
   signal [cmd]        Signal backup/restore
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
@@ -4106,6 +4363,7 @@ bobnet_main() {
         github) shift; cmd_github "$@" ;;
         todo) shift; cmd_todo "$@" ;;
         docs) shift; cmd_docs "$@" ;;
+        incident) shift; cmd_incident "$@" ;;
         signal) shift; cmd_signal "$@" ;;
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
