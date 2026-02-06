@@ -523,12 +523,17 @@ bobnet validate
 
 ### 7. Run the upgrade test
 
-**Option A: Automated (recommended)**
+**Option A: Single Test (Upgrade Only)**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test-upgrade-vm.sh | bash
 ```
 
-**Option B: Manual**
+**Option B: Full Test Suite (Upgrade + Rollback + Re-upgrade)**
+```bash
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test-suite-vm.sh | bash
+```
+
+**Option C: Manual**
 ```bash
 echo "=== Pre-upgrade state ==="
 openclaw --version
@@ -549,12 +554,50 @@ cat ~/.bobnet/ultima-thule/config/openclaw-versions.json
 
 ---
 
+## Automated Test Scripts
+
+Three test scripts available:
+
+**1. `test-upgrade-vm.sh`** - Upgrade test only
+- Installs OpenClaw 2026.1.30
+- Installs BobNet CLI
+- Creates test repo
+- Runs `bobnet upgrade --openclaw`
+- Validates upgrade succeeded
+
+**2. `test-rollback-vm.sh`** - Rollback test
+- Requires upgrade test to run first
+- Runs `bobnet upgrade --openclaw --rollback`
+- Validates rollback to pinned version
+
+**3. `test-suite-vm.sh`** - Full suite
+- Runs upgrade test
+- Runs rollback test  
+- Runs re-upgrade test
+- Reports pass/fail summary
+
+**Usage:**
+```bash
+# Single test
+./test-upgrade-vm.sh [--verbose] [--clean]
+
+# Rollback test
+./test-rollback-vm.sh [--verbose]
+
+# Full suite
+./test-suite-vm.sh [--verbose]
+```
+
+**Flags:**
+- `--verbose, -v` - Show command output
+- `--clean` - Force clean install (deletes existing repos)
+
+---
+
 ## One-Liner Test (Ubuntu VM)
 
-Complete test flow in one command:
-
+**Quick upgrade test:**
 ```bash
-# Install dependencies + run test
 sudo apt update && \
 sudo apt install -y nodejs npm git jq curl && \
 npm install -g openclaw@2026.1.30 && \
@@ -562,6 +605,20 @@ export PATH="$HOME/.local/bin:$PATH" && \
 curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash -s -- --update && \
 curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test-upgrade-vm.sh | bash
 ```
+
+**Full test suite:**
+```bash
+sudo apt update && \
+sudo apt install -y nodejs npm git jq curl && \
+npm install -g openclaw@2026.1.30 && \
+export PATH="$HOME/.local/bin:$PATH" && \
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash -s -- --update && \
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test-suite-vm.sh | bash
+```
+
+---
+
+## One-Liner Test (Old Version)
 
 **What it does:**
 1. Installs Node.js, npm, git, jq, curl
@@ -574,7 +631,7 @@ curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test
 - `install.sh --update` → Installs `bobnet` command
 - Test script runs `bobnet install` → Syncs config into OpenClaw
 
-**Expected output:**
+**Expected output (upgrade test):**
 ```
 ✓ Pre-upgrade:  2026.1.30
 ✓ Post-upgrade: 2026.2.3-1
@@ -582,6 +639,48 @@ curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test
 ✓ Gateway:      running
 
 ✅ All tests passed
+```
+
+**Expected output (full suite):**
+```
+=== Test 1/3: Upgrade (2026.1.30 → latest)
+✓ Test 1 PASSED: Upgrade
+
+=== Test 2/3: Rollback (latest → pinned)
+✓ Test 2 PASSED: Rollback
+
+=== Test 3/3: Re-upgrade (pinned → latest)
+✓ Test 3 PASSED: Re-upgrade
+
+=== Test Suite Summary
+
+  Tests run:  3
+  Passed:     3
+  Failed:     0
+  Duration:   45s
+
+✅ All tests passed! ✨
+```
+
+---
+
+## GitHub Actions CI
+
+Tests run automatically on every push/PR via `.github/workflows/test-upgrade.yml`
+
+**What gets tested:**
+- Fresh Ubuntu environment
+- Install OpenClaw 2026.1.30
+- Install BobNet CLI
+- Run upgrade test
+- Verify version changed
+- Verify version tracking works
+- Validate config
+
+**To run locally:**
+```bash
+cd ~/.bobnet/repos/bobnet-cli
+act  # Uses nektos/act to run GitHub Actions locally
 ```
 
 ---
