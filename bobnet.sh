@@ -2969,18 +2969,10 @@ EOF
     # Step 2: Apply config migrations before switching
     echo ""
     echo "--- Step 2: Apply config migrations ---"
-    local bb_url=$(jq -r '.channels.bluebubbles.serverUrl // ""' "$config" 2>/dev/null)
-    if [[ "$bb_url" =~ ^http://(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|localhost) ]]; then
-        echo "  BlueBubbles uses private IP: $bb_url"
-        if ! jq -e '.channels.bluebubbles.allowPrivateUrl' "$config" >/dev/null 2>&1; then
-            jq '.channels.bluebubbles.allowPrivateUrl = true' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-            success "Added BlueBubbles allowPrivateUrl=true"
-        else
-            echo "  allowPrivateUrl already set"
-        fi
-    else
-        echo "  No migrations needed"
-    fi
+    # TODO: Add config schema validation (openclaw config validate --target-version)
+    # Previously added allowPrivateUrl for BlueBubbles, but that property isn't
+    # supported in 2026.2.3-1. Let openclaw doctor handle config fixes post-upgrade.
+    echo "  No migrations needed (deferred to post-upgrade doctor)"
     
     # Step 3: Stop gateway before npm install
     echo ""
