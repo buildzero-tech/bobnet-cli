@@ -478,6 +478,13 @@ bobnet install
 ```
 
 ### 7. Run the upgrade test
+
+**Option A: Automated (recommended)**
+```bash
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test-upgrade-vm.sh | bash
+```
+
+**Option B: Manual**
 ```bash
 echo "=== Pre-upgrade state ==="
 openclaw --version
@@ -494,6 +501,39 @@ bobnet validate
 echo ""
 echo "=== Version history ==="
 cat ~/.bobnet/ultima-thule/config/openclaw-versions.json
+```
+
+---
+
+## One-Liner Test (Ubuntu VM)
+
+Complete test flow in one command:
+
+```bash
+# Install dependencies + run test
+sudo apt update && \
+sudo apt install -y nodejs npm git jq curl && \
+npm install -g openclaw@2026.1.30 && \
+export PATH="$HOME/.local/bin:$PATH" && \
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash && \
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test-upgrade-vm.sh | bash
+```
+
+**What it does:**
+1. Installs Node.js, npm, git, jq, curl
+2. Installs OpenClaw 2026.1.30
+3. Installs BobNet CLI
+4. Runs automated upgrade test script
+5. Reports results
+
+**Expected output:**
+```
+✓ Pre-upgrade:  2026.1.30
+✓ Post-upgrade: 2026.2.3-1
+✓ Config:       valid
+✓ Gateway:      running
+
+✅ All tests passed
 ```
 
 ---
