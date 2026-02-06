@@ -4,14 +4,55 @@ Automated tests for validating BobNet upgrade mechanisms in clean VM environment
 
 ## Quick Start
 
-### Ubuntu VM (multipass)
+### Automated (One Command)
+
+**Run from your Mac** - creates VM, runs tests, cleans up:
 
 ```bash
-# Launch VM
+cd ~/.bobnet/repos/bobnet-cli
+./test-vm-full.sh
+```
+
+**Expected output:**
+```
+=== Creating VM: bobnet-test (2 CPUs, 4GB RAM, 20GB disk)
+✓ VM created
+✓ VM ready
+
+=== Running test suite inside VM...
+
+=== Test 1/3: Upgrade (2026.1.30 → latest)
+✓ Test 1 PASSED: Upgrade
+
+=== Test 2/3: Rollback (latest → pinned)
+✓ Test 2 PASSED: Rollback
+
+=== Test 3/3: Re-upgrade (pinned → latest)
+✓ Test 3 PASSED: Re-upgrade
+
+✅ All tests passed! ✨
+✓ VM deleted
+
+✅ Test suite completed successfully
+```
+
+**Options:**
+- `--keep` - Keep VM after tests (don't delete)
+- `--verbose` - Show verbose test output
+- `--name <name>` - Custom VM name
+
+---
+
+### Manual (Two Steps)
+
+**Step 1: Create VM (on Mac)**
+```bash
 multipass launch --name bobnet-test --cpus 2 --memory 4G --disk 20G
 multipass shell bobnet-test
+```
 
-# Run full test suite (one command)
+**Step 2: Run tests (inside VM)**
+```bash
 sudo apt update && \
 sudo apt install -y nodejs npm git jq curl && \
 npm install -g openclaw@2026.1.30 && \
@@ -19,8 +60,6 @@ export PATH="$HOME/.local/bin:$PATH" && \
 curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash -s -- --update && \
 curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test-suite-vm.sh | bash
 ```
-
-Expected: All 3 tests pass (upgrade, rollback, re-upgrade)
 
 ---
 

@@ -427,13 +427,44 @@ log "Full log: $LOGFILE"
 
 ## Quick Start (Primary Test)
 
-### 1. Spin up Ubuntu VM
+### Option A: Automated (One Command)
+
+**Run from your Mac** - creates VM, runs tests, cleans up:
+
+```bash
+cd ~/.bobnet/repos/bobnet-cli
+./test-vm-full.sh
+```
+
+**With options:**
+```bash
+./test-vm-full.sh --keep           # Keep VM after tests
+./test-vm-full.sh --verbose        # Show verbose output
+./test-vm-full.sh --name my-test   # Custom VM name
+```
+
+**What it does:**
+1. Creates Ubuntu VM via multipass
+2. Installs dependencies inside VM
+3. Runs full test suite (upgrade + rollback + re-upgrade)
+4. Reports results
+5. Deletes VM (unless --keep)
+
+---
+
+### Option B: Manual (Two Steps)
+
+**Step 1: Create VM (on your Mac)**
 ```bash
 multipass launch --name bobnet-test --cpus 2 --memory 4G --disk 20G
 multipass shell bobnet-test
 ```
 
-### 2. Install dependencies
+**Step 2: Run tests (inside VM)**
+
+**Then continue with manual steps:**
+
+### 2. Install dependencies (inside VM)
 ```bash
 # Update system
 sudo apt update && sudo apt upgrade -y
