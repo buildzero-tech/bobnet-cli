@@ -25,6 +25,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq curl git
       
+      - name: Configure Git
+        run: |
+          git config --global user.email "ci@bobnet.test"
+          git config --global user.name "BobNet CI"
+      
       - name: Install OpenClaw 2026.1.30
         run: |
           npm install -g openclaw@2026.1.30
