@@ -3190,6 +3190,45 @@ EOF
                     ;;
             esac
             ;;
+        project)
+            local action="${1:-help}"
+            shift 2>/dev/null || true
+            case "$action" in
+                create)
+                    cmd_github_project_create "$@"
+                    ;;
+                list)
+                    cmd_github_project_list "$@"
+                    ;;
+                add)
+                    cmd_github_project_add "$@"
+                    ;;
+                status)
+                    cmd_github_project_status "$@"
+                    ;;
+                help|-h|--help)
+                    cat <<'EOF'
+Usage: bobnet github project <command> [options]
+
+GitHub Project commands for cross-repo work tracking.
+
+COMMANDS:
+  create <title>       Create a new project
+  list                 List projects for organization
+  add <issue-url>      Add issue to default project
+  status [project-num] Show project status
+
+EXAMPLES:
+  bobnet github project create "Q1 Work"
+  bobnet github project add https://github.com/owner/repo/issues/123
+  bobnet github project status 4
+EOF
+                    ;;
+                *)
+                    error "Unknown project command: $action (try 'bobnet github project help')"
+                    ;;
+            esac
+            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet github <command> [subcommand] [options]
@@ -3200,10 +3239,16 @@ COMMANDS:
   issue create        Create a new GitHub issue
   issue link          Link commits to issues
   milestone status    Query milestone progress
+  project create      Create a GitHub Project
+  project list        List organization projects
+  project add         Add issue to project
+  project status      Show project status
 
 EXAMPLES:
   bobnet github issue create "Feature: Add SSO" --label enhancement
   bobnet github milestone status "Q1 2026"
+  bobnet github project create "BobNet Work"
+  bobnet github project add https://github.com/owner/repo/issues/5
 
 See 'bobnet github <command> help' for more information on a specific command.
 EOF
@@ -3464,6 +3509,224 @@ EOF
 {{end}}'
         fi
     fi
+}
+
+# GitHub Project commands
+cmd_github_project_create() {
+    local title="${1:-}"
+    local owner=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --owner|-o)
+                owner="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github project create <title> [options]
+
+Create a new GitHub Project.
+
+OPTIONS:
+  --owner, -o <org>   Organization owner (default: from current repo)
+
+EXAMPLES:
+  bobnet github project create "Q1 Work"
+  bobnet github project create "BobNet Work" --owner buildzero-tech
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$title" ]]; then
+                    title="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    [[ -z "$title" ]] && error "Usage: bobnet github project create <title> [--owner <org>]"
+    
+    # Get owner from current repo if not specified
+    if [[ -z "$owner" ]]; then
+        owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null) || {
+            error "Could not detect owner. Use --owner or run from a git repo."
+        }
+    fi
+    
+    echo "Creating project: $title (owner: $owner)"
+    
+    local result
+    result=$(gh project create --owner "$owner" --title "$title" --format json 2>&1) || {
+        error "Failed to create project: $result"
+    }
+    
+    local url number
+    url=$(echo "$result" | jq -r '.url')
+    number=$(echo "$result" | jq -r '.number')
+    
+    success "Created project #$number"
+    echo "$url"
+}
+
+cmd_github_project_list() {
+    local owner=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --owner|-o)
+                owner="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github project list [options]
+
+List GitHub Projects for an organization.
+
+OPTIONS:
+  --owner, -o <org>   Organization owner (default: from current repo)
+
+EXAMPLES:
+  bobnet github project list
+  bobnet github project list --owner buildzero-tech
+EOF
+                return 0
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    # Get owner from current repo if not specified
+    if [[ -z "$owner" ]]; then
+        owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null) || {
+            error "Could not detect owner. Use --owner or run from a git repo."
+        }
+    fi
+    
+    echo "Projects for $owner:"
+    gh project list --owner "$owner" --format json | jq -r '.projects[] | "  #\(.number): \(.title) (\(.items.totalCount) items)"'
+}
+
+cmd_github_project_add() {
+    local url="${1:-}"
+    local project=""
+    local owner=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project|-p)
+                project="$2"
+                shift 2
+                ;;
+            --owner|-o)
+                owner="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github project add <issue-url> [options]
+
+Add an issue or PR to a GitHub Project.
+
+OPTIONS:
+  --project, -p <num>  Project number (default: from BOBNET_PROJECT env or 4)
+  --owner, -o <org>    Organization owner (default: from current repo)
+
+EXAMPLES:
+  bobnet github project add https://github.com/owner/repo/issues/123
+  bobnet github project add https://github.com/owner/repo/issues/5 --project 4
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$url" ]]; then
+                    url="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    [[ -z "$url" ]] && error "Usage: bobnet github project add <issue-url> [--project <num>]"
+    
+    # Get owner from current repo if not specified
+    if [[ -z "$owner" ]]; then
+        owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null) || {
+            error "Could not detect owner. Use --owner or run from a git repo."
+        }
+    fi
+    
+    # Default project from env or 4 (BobNet Work)
+    project="${project:-${BOBNET_PROJECT:-4}}"
+    
+    echo "Adding to project #$project: $url"
+    gh project item-add "$project" --owner "$owner" --url "$url" 2>&1 || {
+        error "Failed to add item to project"
+    }
+    success "Added to project"
+}
+
+cmd_github_project_status() {
+    local project="${1:-}"
+    local owner=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --owner|-o)
+                owner="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github project status [project-num] [options]
+
+Show GitHub Project status and items.
+
+OPTIONS:
+  project-num         Project number (default: from BOBNET_PROJECT env or 4)
+  --owner, -o <org>   Organization owner (default: from current repo)
+
+EXAMPLES:
+  bobnet github project status
+  bobnet github project status 4
+  bobnet github project status 4 --owner buildzero-tech
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$project" && "$1" =~ ^[0-9]+$ ]]; then
+                    project="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    # Get owner from current repo if not specified
+    if [[ -z "$owner" ]]; then
+        owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null) || {
+            error "Could not detect owner. Use --owner or run from a git repo."
+        }
+    fi
+    
+    # Default project from env or 4
+    project="${project:-${BOBNET_PROJECT:-4}}"
+    
+    echo "Project #$project ($owner):"
+    echo
+    
+    # Get project info
+    local items
+    items=$(gh project item-list "$project" --owner "$owner" --format json 2>&1) || {
+        error "Failed to fetch project: $items"
+    }
+    
+    # Display items grouped by repo
+    echo "$items" | jq -r '.items | group_by(.content.repository) | .[] | "[\(.[0].content.repository // "Draft")]", (.[] | "  #\(.content.number // "draft"): \(.content.title)"), ""'
 }
 
 cmd_incident() {
@@ -4149,6 +4412,10 @@ SYNC BEHAVIOR:
   3. Completed todos → Close linked GitHub issues
   4. Closed issues → Mark linked todos as completed
 
+ISSUE REFERENCE FORMATS:
+  #123                    Local repo issue
+  owner/repo#123          Cross-repo issue (full reference)
+
 OPTIONS:
   --dry-run    Show what would be synced without making changes
 
@@ -4194,26 +4461,52 @@ EOF
                 continue
             elif [[ "$line" =~ ^## && "$in_todos" == true ]]; then
                 break
+            fi
+            
+            # Match both formats:
+            # - Local: #123
+            # - Full ref: owner/repo#123
+            local status="" description="" issue_ref="" repo_ref="" issue_num=""
+            
+            if [[ "$in_todos" == true && "$line" =~ ^-[[:space:]]\[([ x])\][[:space:]]+(.+)[[:space:]]([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)#([0-9]+) ]]; then
+                # Full reference: owner/repo#123
+                status="${BASH_REMATCH[1]}"
+                description="${BASH_REMATCH[2]}"
+                repo_ref="${BASH_REMATCH[3]}"
+                issue_num="${BASH_REMATCH[4]}"
+                issue_ref="$repo_ref#$issue_num"
             elif [[ "$in_todos" == true && "$line" =~ ^-[[:space:]]\[([ x])\][[:space:]]+(.+)#([0-9]+) ]]; then
-                local status="${BASH_REMATCH[1]}"
-                local description="${BASH_REMATCH[2]}"
-                local issue_num="${BASH_REMATCH[3]}"
+                # Local reference: #123
+                status="${BASH_REMATCH[1]}"
+                description="${BASH_REMATCH[2]}"
+                issue_num="${BASH_REMATCH[3]}"
+                repo_ref=""
+                issue_ref="#$issue_num"
+            else
+                continue
+            fi
+            
+            # Build gh command with optional --repo
+            local gh_repo_flag=""
+            if [[ -n "$repo_ref" ]]; then
+                gh_repo_flag="--repo $repo_ref"
+            fi
+            
+            # Sync completed todos → close issues
+            if [[ "$status" == "x" ]]; then
+                echo "  $agent: Todo $issue_ref completed → would close issue"
                 
-                # Sync completed todos → close issues
-                if [[ "$status" == "x" ]]; then
-                    echo "  $agent: Todo #$issue_num completed → would close issue"
-                    
-                    if [[ "$dry_run" == false ]]; then
-                        gh issue close "$issue_num" -c "Completed via agent todo sync" 2>/dev/null || {
-                            warn "Failed to close issue #$issue_num"
-                        }
-                    fi
-                    
-                    ((synced++))
-                else
-                    echo "  $agent: Todo #$issue_num pending → would update issue"
-                    ((skipped++))
+                if [[ "$dry_run" == false ]]; then
+                    # shellcheck disable=SC2086
+                    gh issue close "$issue_num" $gh_repo_flag -c "Completed via agent todo sync" 2>/dev/null || {
+                        warn "Failed to close issue $issue_ref"
+                    }
                 fi
+                
+                ((synced++))
+            else
+                echo "  $agent: Todo $issue_ref pending → would update issue"
+                ((skipped++))
             fi
         done < "$memory_file"
     done
