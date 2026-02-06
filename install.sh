@@ -35,6 +35,12 @@ done
 
 log() { [[ "$VERBOSE" == "true" ]] && echo "[DEBUG] $*" || true; }
 
+# Helper functions for install script
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+success() { echo -e "${GREEN}✓${NC} $*"; }
+warn() { echo -e "${YELLOW}warn:${NC} $*" >&2; }
+error() { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
+
 #######################################
 # Install CLI to ~/.local
 #######################################
@@ -93,10 +99,32 @@ print_agent_summary() {
 }
 AGENTS_SH
 
-    # Main CLI
-    cat > ~/.local/lib/bobnet/bobnet.sh << 'BOBNET_SH'
+    # Main CLI (full version)
+    # Try to copy from local repo first, otherwise download
+    if [[ -f "${BASH_SOURCE[0]%/*}/bobnet.sh" ]]; then
+        cp "${BASH_SOURCE[0]%/*}/bobnet.sh" ~/.local/lib/bobnet/bobnet.sh
+        log "Copied full bobnet.sh from local repo"
+    elif [[ -f "$(pwd)/bobnet.sh" ]]; then
+        cp "$(pwd)/bobnet.sh" ~/.local/lib/bobnet/bobnet.sh
+        log "Copied full bobnet.sh from current directory"
+    else
+        log "Downloading full bobnet.sh from GitHub..."
+        curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/bobnet.sh" \
+            > ~/.local/lib/bobnet/bobnet.sh
+    fi
+    chmod +x ~/.local/lib/bobnet/bobnet.sh
+    
+    # Verify it has the expected commands
+    if ! grep -q "^cmd_github()" ~/.local/lib/bobnet/bobnet.sh; then
+        echo "✗ Failed to install full bobnet.sh (missing cmd_github)" >&2
+        exit 1
+    fi
+    success "Installed full bobnet.sh with all commands"
+    
+    # Skip the old heredoc version below - keeping for reference only
+    : << 'BOBNET_SH_HEREDOC_REMOVED'
 # BobNet CLI v3
-BOBNET_CLI_VERSION=$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")
+BOBNET_CLI_VERSION=$(cat "$HOME/.local/lib/bobnet/version" 2
 
 # Config directory
 CONFIG_DIR="$HOME/.openclaw"
@@ -1134,7 +1162,7 @@ bobnet_main() {
         *) error "Unknown command: $1" ;;
     esac
 }
-BOBNET_SH
+BOBNET_SH_HEREDOC_REMOVED
 
     # Wrapper script
     cat > ~/.local/bin/bobnet << 'WRAPPER'

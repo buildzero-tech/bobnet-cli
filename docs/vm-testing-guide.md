@@ -40,29 +40,146 @@ multipass shell bobnet-test
 # Not recommended for OpenClaw (needs background services)
 ```
 
-## Test Scenarios
+## Primary Test Flow
 
-### Scenario 1: Fresh Install (No Existing OpenClaw)
+### Goal
+Test the upgrade path from OpenClaw 2026.1.30 (current Matrix1 version) to latest.
 
-**Goal:** Validate end-to-end install from scratch
+### Steps
+
+**1. Install OpenClaw 2026.1.30**
+```bash
+npm install -g openclaw@2026.1.30
+openclaw --version  # Should show 2026.1.30
+```
+
+**2. Install BobNet CLI**
+```bash
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash
+source ~/.bashrc  # or restart shell
+bobnet --version
+```
+
+**3. Set up minimal BobNet repo**
+```bash
+# Option A: Clone existing (requires auth)
+git clone git@github.com:buildzero-tech/ultima-thule.git ~/.bobnet/ultima-thule
+
+# Option B: Create minimal test repo
+mkdir -p ~/.bobnet/ultima-thule/{config,workspace/bob,agents/bob}
+cat > ~/.bobnet/ultima-thule/config/bobnet.json << 'EOF'
+{
+  "version": "3.5",
+  "defaults": {
+    "model": "anthropic/claude-sonnet-4-5"
+  },
+  "agents": {
+    "bob": {
+      "scope": "meta",
+      "default": true,
+      "model": "anthropic/claude-sonnet-4-5"
+    }
+  },
+  "scopes": {
+    "meta": {
+      "label": "Meta",
+      "collective": "collective/"
+    }
+  }
+}
+EOF
+```
+
+**4. Install BobNet config into OpenClaw**
+```bash
+cd ~/.bobnet/ultima-thule
+bobnet install
+```
+
+**5. Verify initial state**
+```bash
+openclaw --version        # Should be 2026.1.30
+bobnet validate          # Should pass
+openclaw gateway status  # Check if running
+```
+
+**6. Run upgrade**
+```bash
+bobnet upgrade --openclaw
+```
+
+**7. Verify upgrade succeeded**
+```bash
+openclaw --version        # Should be latest (2026.2.3-1 or newer)
+bobnet validate          # Should still pass
+openclaw gateway status  # Should be running
+cat ~/.bobnet/ultima-thule/config/openclaw-versions.json  # Check history
+```
+
+### Expected Results
+
+**Pre-upgrade:**
+- OpenClaw 2026.1.30 installed
+- BobNet configured
+- Gateway running
+- `openclaw-versions.json` created with initial version
+
+**Post-upgrade:**
+- OpenClaw upgraded to latest
+- Gateway restarted successfully
+- Config preserved
+- Version history tracked
+- Health checks pass
+
+**Upgrade output should show:**
+```
+Pre-flight checks...
+✓ Disk space: adequate
+✓ npm registry: reachable
+✓ Target version: 2026.2.3-1
+
+Backing up config...
+✓ Config backed up
+
+Stopping gateway...
+✓ Gateway stopped
+
+Installing openclaw@2026.2.3-1...
+✓ Installed
+
+Starting gateway...
+✓ Gateway started
+
+Health checks...
+✓ Version: 2026.2.3-1
+✓ API responding
+
+✓ Upgrade complete
+```
+
+---
+
+## Alternative Test Scenarios
+
+### Scenario A: Fresh Install (No Existing OpenClaw)
+
+**Goal:** Validate end-to-end install from scratch (not primary test)
 
 **Steps:**
 1. Start clean VM
 2. Install Node.js (v20+)
-3. Install OpenClaw: `curl -fsSL https://openclaw.ai/install.sh | bash`
+3. Install OpenClaw latest: `curl -fsSL https://openclaw.ai/install.sh | bash`
 4. Verify OpenClaw: `openclaw --version`
 5. Install bobnet CLI: `curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash`
-6. Clone ultima-thule (or create new repo)
+6. Set up minimal repo (see Primary Test Flow step 3)
 7. Run `bobnet install`
 8. Validate: `bobnet validate`
-9. Start gateway: `openclaw gateway start`
-10. Check health: `bobnet report`
 
 **Expected Result:** All checks pass, agents configured, gateway running
 
 ---
 
-### Scenario 2: Upgrade Happy Path
+### Scenario B: Upgrade Happy Path (Covered by Primary Flow)
 
 **Goal:** Test normal upgrade flow with health checks passing
 
@@ -86,7 +203,7 @@ multipass shell bobnet-test
 
 ---
 
-### Scenario 3: Upgrade with Rollback
+### Scenario C: Upgrade with Rollback (Advanced)
 
 **Goal:** Test automatic rollback when health checks fail
 
@@ -113,7 +230,7 @@ multipass shell bobnet-test
 
 ---
 
-### Scenario 4: Manual Rollback
+### Scenario D: Manual Rollback (Advanced)
 
 **Goal:** Test explicit rollback command
 
@@ -133,7 +250,7 @@ multipass shell bobnet-test
 
 ---
 
-### Scenario 5: Pre-flight Check Failures
+### Scenario E: Pre-flight Check Failures (Advanced)
 
 **Goal:** Validate pre-flight checks prevent bad upgrades
 
@@ -283,7 +400,7 @@ log "Full log: $LOGFILE"
 
 ---
 
-## Quick Start
+## Quick Start (Primary Test)
 
 ### 1. Spin up Ubuntu VM
 ```bash
@@ -291,14 +408,92 @@ multipass launch --name bobnet-test --cpus 2 --memory 4G --disk 20G
 multipass shell bobnet-test
 ```
 
-### 2. Run setup script
+### 2. Install dependencies
 ```bash
-curl -fsSL <setup-script-url> | bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install Node.js v20 LTS
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Install tools
+sudo apt install -y git jq curl
+
+# Verify
+node --version
+npm --version
 ```
 
-### 3. Install bobnet + run tests
+### 3. Install OpenClaw 2026.1.30
 ```bash
-curl -fsSL <test-runner-url> | bash
+npm install -g openclaw@2026.1.30
+export PATH="$HOME/.local/bin:$PATH"
+openclaw --version  # Should show 2026.1.30
+```
+
+### 4. Install BobNet CLI
+```bash
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+bobnet --version
+```
+
+### 5. Create minimal test repo
+```bash
+mkdir -p ~/.bobnet/ultima-thule/{config,workspace/bob,agents/bob}
+cat > ~/.bobnet/ultima-thule/config/bobnet.json << 'EOF'
+{
+  "version": "3.5",
+  "defaults": {
+    "model": "anthropic/claude-sonnet-4-5"
+  },
+  "agents": {
+    "bob": {
+      "scope": "meta",
+      "default": true,
+      "model": "anthropic/claude-sonnet-4-5"
+    }
+  },
+  "scopes": {
+    "meta": {
+      "label": "Meta",
+      "collective": "collective/"
+    }
+  }
+}
+EOF
+
+# Initialize as git repo
+cd ~/.bobnet/ultima-thule
+git init
+git add -A
+git commit -m "Initial test repo"
+```
+
+### 6. Install BobNet config
+```bash
+cd ~/.bobnet/ultima-thule
+bobnet install
+```
+
+### 7. Run the upgrade test
+```bash
+echo "=== Pre-upgrade state ==="
+openclaw --version
+
+echo ""
+echo "=== Running upgrade ==="
+bobnet upgrade --openclaw
+
+echo ""
+echo "=== Post-upgrade state ==="
+openclaw --version
+bobnet validate
+
+echo ""
+echo "=== Version history ==="
+cat ~/.bobnet/ultima-thule/config/openclaw-versions.json
 ```
 
 ---
