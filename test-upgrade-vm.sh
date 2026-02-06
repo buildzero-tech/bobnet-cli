@@ -5,14 +5,26 @@
 # Tests: OpenClaw 2026.1.30 → latest upgrade path
 # 
 # Usage:
-#   ./test-upgrade-vm.sh [--verbose]
+#   ./test-upgrade-vm.sh [--verbose] [--clean]
+#
+# Options:
+#   --verbose, -v    Show command output
+#   --clean          Force clean install (delete existing repos)
 #
 #######################################
 
 set -euo pipefail
 
 VERBOSE=false
-[[ "${1:-}" == "--verbose" || "${1:-}" == "-v" ]] && VERBOSE=true
+CLEAN=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --verbose|-v) VERBOSE=true; shift ;;
+        --clean) CLEAN=true; shift ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -72,10 +84,16 @@ main() {
     log "--- Install OpenClaw 2026.1.30 ---"
     if command -v openclaw &>/dev/null; then
         local current=$(openclaw --version 2>/dev/null | head -1)
-        warn "OpenClaw already installed: $current"
-        read -p "Reinstall 2026.1.30? [y/N] " -r
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            run_cmd "Installing OpenClaw 2026.1.30" npm install -g openclaw@2026.1.30
+        if [[ "$current" == "2026.1.30" ]]; then
+            success "OpenClaw 2026.1.30 already installed"
+        else
+            warn "OpenClaw already installed: $current"
+            if [[ "$CLEAN" == "true" ]]; then
+                log "Clean mode: reinstalling 2026.1.30"
+                run_cmd "Installing OpenClaw 2026.1.30" npm install -g openclaw@2026.1.30
+            else
+                log "Skipping reinstall (use --clean to force)"
+            fi
         fi
     else
         run_cmd "Installing OpenClaw 2026.1.30" npm install -g openclaw@2026.1.30
@@ -116,12 +134,11 @@ main() {
     local repo_dir="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
     
     if [[ -d "$repo_dir" ]]; then
-        warn "Repo exists: $repo_dir"
-        read -p "Delete and recreate? [y/N] " -r
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
+        if [[ "$CLEAN" == "true" ]]; then
+            warn "Clean mode: deleting existing repo"
             rm -rf "$repo_dir"
         else
-            log "Using existing repo"
+            success "Using existing repo: $repo_dir"
         fi
     fi
     

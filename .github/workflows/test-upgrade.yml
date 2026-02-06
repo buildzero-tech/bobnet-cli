@@ -1,0 +1,75 @@
+name: Test BobNet Upgrade
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-upgrade:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl git
+      
+      - name: Install OpenClaw 2026.1.30
+        run: |
+          npm install -g openclaw@2026.1.30
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      
+      - name: Verify OpenClaw version
+        run: |
+          openclaw --version
+          test "$(openclaw --version)" = "2026.1.30"
+      
+      - name: Install BobNet CLI
+        run: |
+          ./install.sh --update
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      
+      - name: Verify BobNet CLI
+        run: |
+          bobnet --version
+          which bobnet
+      
+      - name: Run upgrade test
+        run: |
+          ./test-upgrade-vm.sh --verbose --clean
+      
+      - name: Verify upgrade succeeded
+        run: |
+          # Check version is newer than 2026.1.30
+          NEW_VERSION=$(openclaw --version)
+          echo "Upgraded to: $NEW_VERSION"
+          
+          # Simple check: version should be different
+          test "$NEW_VERSION" != "2026.1.30"
+      
+      - name: Check version tracking
+        run: |
+          cat ~/.bobnet/ultima-thule/config/openclaw-versions.json
+          
+          # Verify both versions in history
+          jq -e '.history[] | select(.version == "2026.1.30")' \
+            ~/.bobnet/ultima-thule/config/openclaw-versions.json
+          
+          jq -e '.history | length >= 2' \
+            ~/.bobnet/ultima-thule/config/openclaw-versions.json
+      
+      - name: Validate config
+        run: |
+          cd ~/.bobnet/ultima-thule
+          bobnet validate
