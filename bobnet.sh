@@ -2911,9 +2911,9 @@ EOF
         echo "Would perform:"
         echo "  1. Backup config to ~/.openclaw/openclaw.json.pre-upgrade"
         echo "  2. Apply config migrations (BlueBubbles allowPrivateUrl, etc.)"
-        echo "  3. Stop gateway (launchctl bootout)"
+        echo "  3. Stop gateway (openclaw gateway stop)"
         echo "  4. npm install -g openclaw@$target_version"
-        echo "  5. Start gateway (launchctl bootstrap)"
+        echo "  5. Start gateway (openclaw gateway start)"
         echo "  6. Poll health endpoint (up to 30s)"
         echo "  7. Run health checks"
         echo "  8. Rollback if checks fail (reinstall old version)"
@@ -2977,7 +2977,7 @@ EOF
     # Step 3: Stop gateway before npm install
     echo ""
     echo "--- Step 3: Stop gateway ---"
-    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null || true
+    openclaw gateway stop >/dev/null 2>&1 || true
     sleep 2
     success "Gateway stopped"
     
@@ -2995,7 +2995,7 @@ EOF
     echo ""
     echo "--- Step 5: Start gateway ---"
     if [[ "$rollback_needed" == "false" ]]; then
-        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
+        openclaw gateway start >/dev/null 2>&1 || warn "Gateway start failed (may already be running)"
     fi
     
     # Poll for gateway health (up to 30s)
@@ -3112,7 +3112,7 @@ EOF
         cp "$backup" "$config" && success "Restored config backup"
         
         # Start gateway with old version
-        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
+        openclaw gateway start >/dev/null 2>&1 || warn "Gateway start failed (may already be running)"
         sleep 3
         
         # Verify rollback
@@ -3123,7 +3123,7 @@ EOF
             echo -e "${RED}Rollback may have failed. Manual recovery:${NC}"
             echo "  npm install -g openclaw@$current_version"
             echo "  cp $backup $config"
-            echo "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist"
+            echo "  openclaw gateway start"
         fi
         
         echo ""

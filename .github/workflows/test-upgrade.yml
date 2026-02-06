@@ -58,7 +58,6 @@ jobs:
         env:
           OPENCLAW_CURRENT: ${{ vars.OPENCLAW_CURRENT || '2026.1.30' }}
           OPENCLAW_TARGET: ${{ vars.OPENCLAW_TARGET || 'latest' }}
-          SKIP_GATEWAY: true
         run: |
           ./test-upgrade-vm.sh --verbose --clean
       
