@@ -53,12 +53,23 @@ npm install -g openclaw@2026.1.30
 openclaw --version  # Should show 2026.1.30
 ```
 
-**2. Install BobNet CLI**
+**2. Install BobNet CLI Binary**
+
+**What this does:** Installs the `bobnet` command to `~/.local/bin/bobnet`
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash
-source ~/.bashrc  # or restart shell
+# Install CLI binary only (no repo setup)
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash -s -- --update
+
+# Add to PATH for current session
+export PATH="$HOME/.local/bin:$PATH"
+
+# Verify installation
 bobnet --version
+which bobnet  # Should show ~/.local/bin/bobnet
 ```
+
+**Note:** `install.sh --update` installs **only the CLI binary**, not the repo. We'll create the repo manually in the next step.
 
 **3. Set up minimal BobNet repo**
 ```bash
@@ -90,11 +101,25 @@ cat > ~/.bobnet/ultima-thule/config/bobnet.json << 'EOF'
 EOF
 ```
 
-**4. Install BobNet config into OpenClaw**
+**4. Install BobNet Config into OpenClaw**
+
+**What this does:** Reads `config/bobnet.json` and syncs agents/bindings/channels into OpenClaw's config (`~/.openclaw/openclaw.json`)
+
 ```bash
 cd ~/.bobnet/ultima-thule
+
+# Sync BobNet config → OpenClaw
 bobnet install
+
+# What gets synced:
+#   - Agents (bob) → OpenClaw agents.list
+#   - Bindings → OpenClaw bindings
+#   - Channels → OpenClaw channels
 ```
+
+**This is separate from installing the CLI binary.** You need both:
+1. `install.sh` → installs the `bobnet` command
+2. `bobnet install` → syncs your config into OpenClaw
 
 **5. Verify initial state**
 ```bash
@@ -432,11 +457,17 @@ export PATH="$HOME/.local/bin:$PATH"
 openclaw --version  # Should show 2026.1.30
 ```
 
-### 4. Install BobNet CLI
+### 4. Install BobNet CLI Binary
 ```bash
-curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash
+# Install CLI binary only (not the repo)
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash -s -- --update
+
+# Add to PATH
 export PATH="$HOME/.local/bin:$PATH"
+
+# Verify
 bobnet --version
+which bobnet  # Should show ~/.local/bin/bobnet
 ```
 
 ### 5. Create minimal test repo
@@ -471,11 +502,24 @@ git add -A
 git commit -m "Initial test repo"
 ```
 
-### 6. Install BobNet config
+### 6. Sync BobNet Config into OpenClaw
 ```bash
 cd ~/.bobnet/ultima-thule
+
+# This reads config/bobnet.json and writes to ~/.openclaw/openclaw.json
 bobnet install
+
+# Verify sync worked
+bobnet validate
 ```
+
+**What happens:**
+- Reads `config/bobnet.json`
+- Syncs agents → `~/.openclaw/openclaw.json` (agents.list)
+- Syncs bindings → `~/.openclaw/openclaw.json` (bindings)
+- Syncs channels → `~/.openclaw/openclaw.json` (channels)
+
+**This is step 2 of BobNet installation.** Step 1 was installing the CLI binary.
 
 ### 7. Run the upgrade test
 
@@ -515,16 +559,20 @@ sudo apt update && \
 sudo apt install -y nodejs npm git jq curl && \
 npm install -g openclaw@2026.1.30 && \
 export PATH="$HOME/.local/bin:$PATH" && \
-curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash && \
+curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash -s -- --update && \
 curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/test-upgrade-vm.sh | bash
 ```
 
 **What it does:**
 1. Installs Node.js, npm, git, jq, curl
 2. Installs OpenClaw 2026.1.30
-3. Installs BobNet CLI
-4. Runs automated upgrade test script
+3. Installs BobNet CLI binary (`--update` flag = CLI only, no repo)
+4. Runs automated upgrade test script (creates test repo + runs upgrade)
 5. Reports results
+
+**Two-step BobNet installation:**
+- `install.sh --update` → Installs `bobnet` command
+- Test script runs `bobnet install` → Syncs config into OpenClaw
 
 **Expected output:**
 ```

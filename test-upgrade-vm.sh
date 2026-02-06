@@ -92,20 +92,23 @@ main() {
     fi
     echo ""
     
-    # 3. Install BobNet CLI
-    log "--- Install BobNet CLI ---"
+    # 3. Install BobNet CLI binary
+    log "--- Install BobNet CLI Binary ---"
+    log "Step 1/2: Install bobnet command to ~/.local/bin/bobnet"
+    
     if [[ -f ~/.local/bin/bobnet ]]; then
         local bobnet_ver=$(bobnet --version 2>/dev/null || echo "unknown")
         success "BobNet CLI already installed: $bobnet_ver"
     else
-        log "Downloading install script..."
-        curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash
+        log "Downloading install.sh..."
+        curl -fsSL https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh | bash -s -- --update
         export PATH="$HOME/.local/bin:$PATH"
-        success "BobNet CLI installed"
+        success "BobNet CLI binary installed"
     fi
     
     local bobnet_ver=$(bobnet --version 2>/dev/null || echo "unknown")
     log "BobNet CLI version: $bobnet_ver"
+    log "Binary location: $(which bobnet)"
     echo ""
     
     # 4. Create minimal test repo
@@ -162,11 +165,19 @@ EOF
     fi
     echo ""
     
-    # 5. Install BobNet config
-    log "--- Install BobNet Config ---"
+    # 5. Install BobNet config into OpenClaw
+    log "--- Install BobNet Config into OpenClaw ---"
+    log "Step 2/2: Sync config/bobnet.json → OpenClaw config"
     cd "$repo_dir"
-    run_cmd "Running bobnet install" bobnet install --yes
-    success "BobNet config installed"
+    
+    log "Running: bobnet install"
+    log "  This reads config/bobnet.json and syncs to ~/.openclaw/openclaw.json"
+    run_cmd "Syncing BobNet config to OpenClaw" bobnet install --yes
+    
+    success "BobNet config installed into OpenClaw"
+    log "  - Agents synced to OpenClaw"
+    log "  - Bindings synced to OpenClaw"
+    log "  - Channels synced to OpenClaw"
     echo ""
     
     # 6. Validate pre-upgrade state
