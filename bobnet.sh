@@ -3145,7 +3145,7 @@ EOF
         "version": $ver,
         "installedAt": $ts,
         "status": "installed",
-        "note": "Upgraded from " + $from
+        "note": ("Upgraded from " + $from)
       }] + .history
     ' "$VERSIONS_FILE" > "$tmp_file" && mv "$tmp_file" "$VERSIONS_FILE"
     
