@@ -1,7 +1,9 @@
 #!/bin/bash
-# git-agent-commit - Easy agent-attributed commits
+# git-agent-commit - Easy agent-attributed commits with GitHub integration
 # Usage: git-agent-commit "feat(ops): add deployment pipeline"
-#        git-agent-commit "fix: resolve bug" --full  # includes co-authored-by
+#        git-agent-commit "fix: resolve bug" --full
+#        git-agent-commit "feat(auth): add SSO" --issue 123
+#        git-agent-commit "fix: login bug" --issue 45 --close --full
 
 set -euo pipefail
 
@@ -27,20 +29,108 @@ else
     exit 1
 fi
 
-MESSAGE="$1"
-FULL_ATTR=${2:-}
+# Parse arguments
+MESSAGE=""
+FULL_ATTR=false
+ISSUES=()
+AUTO_LINK=false
+CLOSE_ISSUE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --full)
+            FULL_ATTR=true
+            shift
+            ;;
+        --issue)
+            ISSUES+=("$2")
+            shift 2
+            ;;
+        --link)
+            AUTO_LINK=true
+            shift
+            ;;
+        --close)
+            CLOSE_ISSUE=true
+            shift
+            ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: git-agent-commit <message> [options]
+
+Commit with agent attribution and optional GitHub issue linking.
+
+OPTIONS:
+  --full              Include Co-authored-by trailer
+  --issue <number>    Reference issue (can be repeated)
+  --close             Add "Closes #<issue>" (implies --issue)
+  --link              Auto-link commit to issues after committing
+
+EXAMPLES:
+  git-agent-commit "feat(auth): add SSO provider"
+  git-agent-commit "fix: resolve login bug" --issue 123 --full
+  git-agent-commit "feat(api): new endpoint" --issue 45 --link
+  git-agent-commit "fix: critical bug" --issue 67 --close
+EOF
+            exit 0
+            ;;
+        *)
+            if [[ -z "$MESSAGE" ]]; then
+                MESSAGE="$1"
+                shift
+            else
+                echo "❌ Unexpected argument: $1"
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+[[ -z "$MESSAGE" ]] && { echo "❌ Commit message is required"; exit 1; }
 
 # Format the commit message
 COMMIT_MSG="[$AGENT] $MESSAGE"
 
-if [[ "$FULL_ATTR" == "--full" ]]; then
-    # Include co-authored-by
-    git commit -m "$COMMIT_MSG" -m "Co-authored-by: $AGENT <$EMAIL>"
-    echo "✅ Committed with full attribution: $AGENT"
-else
-    # Prefix only
-    git commit -m "$COMMIT_MSG"
-    echo "✅ Committed with prefix attribution: $AGENT"
+# Add issue references
+if [[ ${#ISSUES[@]} -gt 0 ]]; then
+    ISSUE_REFS=""
+    for issue in "${ISSUES[@]}"; do
+        # Add # prefix if not present
+        [[ "$issue" =~ ^[0-9]+$ ]] && issue="#$issue"
+        ISSUE_REFS="$ISSUE_REFS $issue"
+    done
+    COMMIT_MSG="$COMMIT_MSG$ISSUE_REFS"
 fi
 
+# Build commit arguments
+COMMIT_ARGS=(-m "$COMMIT_MSG")
+
+# Add "Closes" trailer if requested
+if [[ $CLOSE_ISSUE == true && ${#ISSUES[@]} -gt 0 ]]; then
+    for issue in "${ISSUES[@]}"; do
+        [[ "$issue" =~ ^#?([0-9]+)$ ]] && issue_num="${BASH_REMATCH[1]}"
+        COMMIT_ARGS+=(-m "Closes #$issue_num")
+    done
+fi
+
+# Add co-authored-by if requested
+if [[ $FULL_ATTR == true ]]; then
+    COMMIT_ARGS+=(-m "Co-authored-by: $AGENT <$EMAIL>")
+fi
+
+# Commit
+git commit "${COMMIT_ARGS[@]}"
+
+echo "✅ Committed with attribution: $AGENT"
 echo "📝 Message: $COMMIT_MSG"
+
+# Auto-link if requested
+if [[ $AUTO_LINK == true && ${#ISSUES[@]} -gt 0 ]]; then
+    echo "🔗 Linking commit to issues..."
+    # Get the commit hash
+    COMMIT_HASH=$(git rev-parse HEAD)
+    # Call bobnet github issue link
+    bobnet github issue link "$COMMIT_HASH" 2>/dev/null || {
+        echo "⚠️  Auto-link failed (is 'gh' CLI configured?)"
+    }
+fi

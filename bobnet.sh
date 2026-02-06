@@ -1058,8 +1058,8 @@ EOF
         [[ "$is_default" == "true" ]] && list+=",\"default\":true"
         [[ -n "$model" ]] && list+=",\"model\":\"$model\""
         [[ -n "$spawn_perms" ]] && list+=",\"subagents\":{\"allowAgents\":$spawn_perms}"
-        # Always include PROXY.md in extraPaths (file presence controls proxy mode)
-        list+=",\"extraPaths\":[\"$ws/PROXY.md\"]"
+        # Always include PROXY.md in memorySearch.extraPaths (file presence controls proxy mode)
+        list+=",\"memorySearch\":{\"extraPaths\":[\"$ws/PROXY.md\"]}"
         list+="}"
     done
     list+=']'
@@ -3129,6 +3129,343 @@ EOF
     esac
 }
 
+cmd_github() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        issue)
+            local action="${1:-help}"
+            shift 2>/dev/null || true
+            case "$action" in
+                create)
+                    cmd_github_issue_create "$@"
+                    ;;
+                link)
+                    cmd_github_issue_link "$@"
+                    ;;
+                help|-h|--help)
+                    cat <<'EOF'
+Usage: bobnet github issue <command> [options]
+
+GitHub issue commands.
+
+COMMANDS:
+  create <title> [options]     Create a new issue
+  link <commit-hash>           Link a commit to its referenced issues
+
+EXAMPLES:
+  bobnet github issue create "Add OAuth provider" --body "..." --label enhancement
+  bobnet github issue link abc1234
+EOF
+                    ;;
+                *)
+                    error "Unknown issue command: $action (try 'bobnet github issue help')"
+                    ;;
+            esac
+            ;;
+        milestone)
+            local action="${1:-help}"
+            shift 2>/dev/null || true
+            case "$action" in
+                status)
+                    cmd_github_milestone_status "$@"
+                    ;;
+                help|-h|--help)
+                    cat <<'EOF'
+Usage: bobnet github milestone <command> [options]
+
+GitHub milestone commands.
+
+COMMANDS:
+  status [milestone]           Show milestone status and progress
+
+EXAMPLES:
+  bobnet github milestone status "v1.0.0"
+  bobnet github milestone status              # List all milestones
+EOF
+                    ;;
+                *)
+                    error "Unknown milestone command: $action (try 'bobnet github milestone help')"
+                    ;;
+            esac
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet github <command> [subcommand] [options]
+
+GitHub integration commands for project tracking.
+
+COMMANDS:
+  issue create        Create a new GitHub issue
+  issue link          Link commits to issues
+  milestone status    Query milestone progress
+
+EXAMPLES:
+  bobnet github issue create "Feature: Add SSO" --label enhancement
+  bobnet github milestone status "Q1 2026"
+
+See 'bobnet github <command> help' for more information on a specific command.
+EOF
+            ;;
+        *)
+            error "Unknown github command: $subcmd (try 'bobnet github help')"
+            ;;
+    esac
+}
+
+cmd_github_issue_create() {
+    # Parse arguments
+    local title="" body="" labels=() assignees=() milestone="" repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --body|-b)
+                body="$2"
+                shift 2
+                ;;
+            --label|-l)
+                labels+=("$2")
+                shift 2
+                ;;
+            --assignee|-a)
+                assignees+=("$2")
+                shift 2
+                ;;
+            --milestone|-m)
+                milestone="$2"
+                shift 2
+                ;;
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github issue create <title> [options]
+
+Create a new GitHub issue in the current repository.
+
+OPTIONS:
+  --body, -b <text>        Issue body/description
+  --label, -l <label>      Add label (can be repeated)
+  --assignee, -a <user>    Assign to user (can be repeated)
+  --milestone, -m <name>   Add to milestone
+  --repo, -R <owner/repo>  Target repository (default: current repo)
+
+EXAMPLES:
+  bobnet github issue create "Add OAuth support" \
+    --body "Need to implement OAuth2 flow" \
+    --label enhancement \
+    --label auth \
+    --assignee bob
+
+  bobnet github issue create "Fix login bug" \
+    --body "Users can't log in after password reset" \
+    --label bug \
+    --milestone "v1.5.0"
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$title" ]]; then
+                    title="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$title" ]] && error "Title is required"
+    
+    # Build gh command
+    local cmd=(gh issue create --title "$title")
+    
+    [[ -n "$body" ]] && cmd+=(--body "$body")
+    [[ -n "$milestone" ]] && cmd+=(--milestone "$milestone")
+    [[ -n "$repo" ]] && cmd+=(--repo "$repo")
+    
+    if [[ ${#labels[@]} -gt 0 ]]; then
+        for label in "${labels[@]}"; do
+            cmd+=(--label "$label")
+        done
+    fi
+    
+    if [[ ${#assignees[@]} -gt 0 ]]; then
+        for assignee in "${assignees[@]}"; do
+            cmd+=(--assignee "$assignee")
+        done
+    fi
+    
+    # Execute
+    echo "Creating issue: $title" >&2
+    "${cmd[@]}" || error "Failed to create issue"
+}
+
+cmd_github_issue_link() {
+    local commit_hash="$1"
+    
+    if [[ "$commit_hash" == "-h" || "$commit_hash" == "--help" ]]; then
+        cat <<'EOF'
+Usage: bobnet github issue link <commit-hash>
+
+Link a commit to the issues it references (via #123 syntax).
+
+This command:
+1. Extracts issue numbers from the commit message
+2. Adds a comment to each issue with the commit reference
+3. Updates issue labels if the commit type indicates resolution
+
+EXAMPLES:
+  bobnet github issue link abc1234
+  bobnet github issue link HEAD
+  bobnet github issue link main~3
+EOF
+        return 0
+    fi
+    
+    [[ -z "$commit_hash" ]] && error "Commit hash is required"
+    
+    # Get commit message
+    local commit_msg
+    commit_msg=$(git log -1 --format=%B "$commit_hash" 2>/dev/null) || error "Invalid commit: $commit_hash"
+    
+    # Extract issue numbers (#123, #456, etc.)
+    local issue_numbers
+    issue_numbers=$(echo "$commit_msg" | grep -oE '#[0-9]+' | tr -d '#' | sort -u)
+    
+    if [[ -z "$issue_numbers" ]]; then
+        echo "No issue references found in commit $commit_hash"
+        return 0
+    fi
+    
+    # Get short hash for comments
+    local short_hash
+    short_hash=$(git rev-parse --short "$commit_hash")
+    
+    # Get commit subject (first line)
+    local commit_subject
+    commit_subject=$(git log -1 --format=%s "$commit_hash")
+    
+    echo "Found issue references in commit $short_hash:"
+    echo "$issue_numbers" | while read -r issue_num; do
+        echo "  #$issue_num"
+    done
+    
+    # Add comment to each issue
+    echo
+    echo "$issue_numbers" | while read -r issue_num; do
+        local comment="Referenced in commit $short_hash: $commit_subject"
+        
+        echo "Adding comment to issue #$issue_num..."
+        gh issue comment "$issue_num" --body "$comment" 2>/dev/null || {
+            warn "Failed to comment on issue #$issue_num (may not exist or no access)"
+        }
+    done
+    
+    success "Linked commit $short_hash to referenced issues"
+}
+
+cmd_github_milestone_status() {
+    local milestone_name="${1:-}"
+    local repo="${2:-}"
+    
+    if [[ "$milestone_name" == "-h" || "$milestone_name" == "--help" ]]; then
+        cat <<'EOF'
+Usage: bobnet github milestone status [milestone-name] [repo]
+
+Show milestone progress and issue status.
+
+If no milestone name is provided, lists all milestones.
+
+OPTIONS:
+  milestone-name    Name or number of the milestone
+  repo             Repository (default: current repo)
+
+EXAMPLES:
+  bobnet github milestone status
+  bobnet github milestone status "v1.0.0"
+  bobnet github milestone status "Q1 2026" buildzero-tech/finmindful
+EOF
+        return 0
+    fi
+    
+    if [[ -z "$milestone_name" ]]; then
+        # List all milestones
+        echo "Milestones:"
+        if [[ -n "$repo" ]]; then
+            gh api repos/:owner/:repo/milestones --repo "$repo" \
+                --jq '.[] | "  \(.title) - \(.open_issues) open / \(.closed_issues) closed (\(.state))"' 2>/dev/null || {
+                error "Failed to fetch milestones (are you in a git repo?)"
+            }
+        else
+            gh api repos/:owner/:repo/milestones \
+                --jq '.[] | "  \(.title) - \(.open_issues) open / \(.closed_issues) closed (\(.state))"' 2>/dev/null || {
+                error "Failed to fetch milestones (are you in a git repo?)"
+            }
+        fi
+        return 0
+    fi
+    
+    # Get specific milestone
+    local milestone_data
+    if [[ -n "$repo" ]]; then
+        milestone_data=$(gh api repos/:owner/:repo/milestones --repo "$repo" \
+            --jq ".[] | select(.title == \"$milestone_name\")" 2>/dev/null)
+    else
+        milestone_data=$(gh api repos/:owner/:repo/milestones \
+            --jq ".[] | select(.title == \"$milestone_name\")" 2>/dev/null)
+    fi
+    
+    if [[ -z "$milestone_data" ]]; then
+        error "Milestone not found: $milestone_name"
+    fi
+    
+    # Parse milestone data
+    local title state open_issues closed_issues due_on description
+    title=$(echo "$milestone_data" | jq -r '.title')
+    state=$(echo "$milestone_data" | jq -r '.state')
+    open_issues=$(echo "$milestone_data" | jq -r '.open_issues')
+    closed_issues=$(echo "$milestone_data" | jq -r '.closed_issues')
+    due_on=$(echo "$milestone_data" | jq -r '.due_on // "No due date"')
+    description=$(echo "$milestone_data" | jq -r '.description // "No description"')
+    
+    # Calculate progress
+    local total_issues=$((open_issues + closed_issues))
+    local progress=0
+    if [[ $total_issues -gt 0 ]]; then
+        progress=$((closed_issues * 100 / total_issues))
+    fi
+    
+    # Display
+    echo "Milestone: $title"
+    echo "Status: $state"
+    echo "Progress: $closed_issues/$total_issues issues ($progress%)"
+    echo "Due: $due_on"
+    echo
+    echo "Description:"
+    echo "$description"
+    echo
+    
+    # Show open issues
+    if [[ $open_issues -gt 0 ]]; then
+        echo "Open issues ($open_issues):"
+        if [[ -n "$repo" ]]; then
+            gh issue list --milestone "$milestone_name" --state open --repo "$repo" \
+                --json number,title,labels \
+                --template '{{range .}}  #{{.number}} {{.title}}{{range .labels}} [{{.name}}]{{end}}
+{{end}}'
+        else
+            gh issue list --milestone "$milestone_name" --state open \
+                --json number,title,labels \
+                --template '{{range .}}  #{{.number}} {{.title}}{{range .labels}} [{{.name}}]{{end}}
+{{end}}'
+        fi
+    fi
+}
+
 cmd_groupname() {
     local agent="${1:-}" status="${2:-}"
     
@@ -3229,6 +3566,7 @@ COMMANDS:
   int [cmd]           Run integrations (cursor)
   search [pattern]    Search session transcripts (grep)
   git [cmd]           Git attribution commands (commit, check)
+  github [cmd]        GitHub integration (issues, milestones)
   signal [cmd]        Signal backup/restore
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
@@ -3261,6 +3599,7 @@ bobnet_main() {
         proxy) shift; cmd_proxy "$@" ;;
         search) shift; cmd_search "$@" ;;
         git) shift; cmd_git "$@" ;;
+        github) shift; cmd_github "$@" ;;
         signal) shift; cmd_signal "$@" ;;
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
