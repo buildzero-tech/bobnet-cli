@@ -30,15 +30,19 @@ jobs:
           git config --global user.email "ci@bobnet.test"
           git config --global user.name "BobNet CI"
       
-      - name: Install OpenClaw 2026.1.30
+      - name: Install OpenClaw (current version)
+        env:
+          OPENCLAW_CURRENT: ${{ vars.OPENCLAW_CURRENT || '2026.1.30' }}
         run: |
-          npm install -g openclaw@2026.1.30
+          npm install -g "openclaw@$OPENCLAW_CURRENT"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
       
       - name: Verify OpenClaw version
+        env:
+          OPENCLAW_CURRENT: ${{ vars.OPENCLAW_CURRENT || '2026.1.30' }}
         run: |
           openclaw --version
-          test "$(openclaw --version)" = "2026.1.30"
+          test "$(openclaw --version)" = "$OPENCLAW_CURRENT"
       
       - name: Install BobNet CLI
         run: |
@@ -51,26 +55,41 @@ jobs:
           which bobnet
       
       - name: Run upgrade test
+        env:
+          OPENCLAW_CURRENT: ${{ vars.OPENCLAW_CURRENT || '2026.1.30' }}
+          OPENCLAW_TARGET: ${{ vars.OPENCLAW_TARGET || 'latest' }}
+          SKIP_GATEWAY: true
         run: |
           ./test-upgrade-vm.sh --verbose --clean
       
       - name: Verify upgrade succeeded
+        env:
+          OPENCLAW_CURRENT: ${{ vars.OPENCLAW_CURRENT || '2026.1.30' }}
+          OPENCLAW_TARGET: ${{ vars.OPENCLAW_TARGET || 'latest' }}
         run: |
-          # Check version is newer than 2026.1.30
           NEW_VERSION=$(openclaw --version)
           echo "Upgraded to: $NEW_VERSION"
           
-          # Simple check: version should be different
-          test "$NEW_VERSION" != "2026.1.30"
+          # Check version changed
+          test "$NEW_VERSION" != "$OPENCLAW_CURRENT"
+          
+          # If specific target version, verify exact match
+          if [ "$OPENCLAW_TARGET" != "latest" ]; then
+            test "$NEW_VERSION" = "$OPENCLAW_TARGET"
+          fi
       
       - name: Check version tracking
+        env:
+          OPENCLAW_CURRENT: ${{ vars.OPENCLAW_CURRENT || '2026.1.30' }}
         run: |
           cat ~/.bobnet/ultima-thule/config/openclaw-versions.json
           
-          # Verify both versions in history
-          jq -e '.history[] | select(.version == "2026.1.30")' \
+          # Verify starting version in history
+          jq -e --arg ver "$OPENCLAW_CURRENT" \
+            '.history[] | select(.version == $ver)' \
             ~/.bobnet/ultima-thule/config/openclaw-versions.json
           
+          # Verify at least 2 entries (before + after)
           jq -e '.history | length >= 2' \
             ~/.bobnet/ultima-thule/config/openclaw-versions.json
       

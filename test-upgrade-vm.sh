@@ -2,7 +2,7 @@
 #######################################
 # BobNet Upgrade Test Script
 # 
-# Tests: OpenClaw 2026.1.30 → latest upgrade path
+# Tests: OpenClaw upgrade path
 # 
 # Usage:
 #   ./test-upgrade-vm.sh [--verbose] [--clean]
@@ -11,17 +11,36 @@
 #   --verbose, -v    Show command output
 #   --clean          Force clean install (delete existing repos)
 #
+# Environment:
+#   OPENCLAW_CURRENT   Starting version (default: 2026.1.30)
+#   OPENCLAW_TARGET    Target version (default: latest)
+#   SKIP_GATEWAY       Skip gateway health checks (default: false)
+#
+# Examples:
+#   # Default: 2026.1.30 → latest
+#   ./test-upgrade-vm.sh
+#
+#   # Specific versions
+#   OPENCLAW_CURRENT=2026.2.1 OPENCLAW_TARGET=2026.2.3-1 ./test-upgrade-vm.sh
+#
+#   # CI mode (skip gateway)
+#   SKIP_GATEWAY=true ./test-upgrade-vm.sh
+#
 #######################################
 
 set -euo pipefail
 
 VERBOSE=false
 CLEAN=false
+OPENCLAW_CURRENT="${OPENCLAW_CURRENT:-2026.1.30}"
+OPENCLAW_TARGET="${OPENCLAW_TARGET:-latest}"
+SKIP_GATEWAY="${SKIP_GATEWAY:-false}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --verbose|-v) VERBOSE=true; shift ;;
         --clean) CLEAN=true; shift ;;
+        --skip-gateway) SKIP_GATEWAY=true; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -68,7 +87,8 @@ run_cmd() {
 
 main() {
     log "=== BobNet Upgrade Test ==="
-    log "Testing: OpenClaw 2026.1.30 → latest"
+    log "Testing: OpenClaw $OPENCLAW_CURRENT → $OPENCLAW_TARGET"
+    [[ "$SKIP_GATEWAY" == "true" ]] && log "Mode: Skip gateway checks (CI)"
     echo ""
     
     # 1. Check prerequisites
@@ -80,33 +100,33 @@ main() {
     success "All tools present"
     echo ""
     
-    # 2. Install OpenClaw 2026.1.30
-    log "--- Install OpenClaw 2026.1.30 ---"
+    # 2. Install OpenClaw (current version)
+    log "--- Install OpenClaw $OPENCLAW_CURRENT ---"
     if command -v openclaw &>/dev/null; then
         local current=$(openclaw --version 2>/dev/null | head -1)
-        if [[ "$current" == "2026.1.30" ]]; then
-            success "OpenClaw 2026.1.30 already installed"
+        if [[ "$current" == "$OPENCLAW_CURRENT" ]]; then
+            success "OpenClaw $OPENCLAW_CURRENT already installed"
         else
             warn "OpenClaw already installed: $current"
             if [[ "$CLEAN" == "true" ]]; then
-                log "Clean mode: reinstalling 2026.1.30"
-                run_cmd "Installing OpenClaw 2026.1.30" npm install -g openclaw@2026.1.30
+                log "Clean mode: reinstalling $OPENCLAW_CURRENT"
+                run_cmd "Installing OpenClaw $OPENCLAW_CURRENT" npm install -g "openclaw@$OPENCLAW_CURRENT"
             else
                 log "Skipping reinstall (use --clean to force)"
             fi
         fi
     else
-        run_cmd "Installing OpenClaw 2026.1.30" npm install -g openclaw@2026.1.30
+        run_cmd "Installing OpenClaw $OPENCLAW_CURRENT" npm install -g "openclaw@$OPENCLAW_CURRENT"
     fi
     
     # Add to PATH for this session
     export PATH="$HOME/.local/bin:$PATH"
     
     local version=$(openclaw --version 2>/dev/null | head -1)
-    if [[ "$version" == "2026.1.30" ]]; then
+    if [[ "$version" == "$OPENCLAW_CURRENT" ]]; then
         success "OpenClaw version: $version"
     else
-        error "Expected 2026.1.30, got: $version"
+        error "Expected $OPENCLAW_CURRENT, got: $version"
     fi
     echo ""
     
@@ -214,11 +234,15 @@ EOF
     
     # 7. Run upgrade
     log "--- Running Upgrade ---"
-    log "Target: latest"
+    log "Target: $OPENCLAW_TARGET"
     echo ""
     
+    # Build upgrade command
+    local upgrade_cmd="bobnet upgrade --openclaw --yes"
+    [[ "$OPENCLAW_TARGET" != "latest" ]] && upgrade_cmd="$upgrade_cmd --version $OPENCLAW_TARGET"
+    
     # Run upgrade (not silent - we want to see progress)
-    if bobnet upgrade --openclaw --yes; then
+    if $upgrade_cmd; then
         success "Upgrade completed"
     else
         error "Upgrade failed"
@@ -229,10 +253,17 @@ EOF
     log "--- Post-Upgrade Validation ---"
     
     local post_version=$(openclaw --version 2>/dev/null | head -1)
+    
+    # Check version changed
     if [[ "$post_version" == "$pre_version" ]]; then
         error "Version unchanged: $post_version"
     else
         success "Version updated: $pre_version → $post_version"
+    fi
+    
+    # Verify expected version (if not "latest")
+    if [[ "$OPENCLAW_TARGET" != "latest" && "$post_version" != "$OPENCLAW_TARGET" ]]; then
+        error "Expected $OPENCLAW_TARGET, got $post_version"
     fi
     
     run_cmd "Validating config" bobnet validate
@@ -249,7 +280,12 @@ EOF
     success "Pre-upgrade:  $pre_version"
     success "Post-upgrade: $post_version"
     success "Config:       valid"
-    success "Gateway:      $(openclaw gateway status >/dev/null 2>&1 && echo 'running' || echo 'stopped')"
+    
+    if [[ "$SKIP_GATEWAY" == "true" ]]; then
+        success "Gateway:      skipped (CI mode)"
+    else
+        success "Gateway:      $(openclaw gateway status >/dev/null 2>&1 && echo 'running' || echo 'stopped')"
+    fi
     echo ""
     
     log "✅ All tests passed"
