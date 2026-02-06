@@ -3206,6 +3206,12 @@ EOF
                 status)
                     cmd_github_project_status "$@"
                     ;;
+                sync)
+                    cmd_github_project_sync "$@"
+                    ;;
+                set-status)
+                    cmd_github_project_set_status "$@"
+                    ;;
                 help|-h|--help)
                     cat <<'EOF'
 Usage: bobnet github project <command> [options]
@@ -3217,11 +3223,16 @@ COMMANDS:
   list                 List projects for organization
   add <issue-url>      Add issue to default project
   status [project-num] Show project status
+  sync [--project N]   Sync project field metadata to cache
+  set-status <issue> <status> [--project N]  Set issue status in project
 
 EXAMPLES:
   bobnet github project create "Q1 Work"
   bobnet github project add https://github.com/owner/repo/issues/123
   bobnet github project status 4
+  bobnet github project sync
+  bobnet github project set-status 42 in-progress
+  bobnet github project set-status owner/repo#42 done
 EOF
                     ;;
                 *)
@@ -3727,6 +3738,332 @@ EOF
     
     # Display items grouped by repo
     echo "$items" | jq -r '.items | group_by(.content.repository) | .[] | "[\(.[0].content.repository // "Draft")]", (.[] | "  #\(.content.number // "draft"): \(.content.title)"), ""'
+}
+
+cmd_github_project_sync() {
+    local project=""
+    local owner=""
+    local refresh=false
+    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/agents-schema.json}"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project|-p)
+                project="$2"
+                shift 2
+                ;;
+            --owner|-o)
+                owner="$2"
+                shift 2
+                ;;
+            --refresh|-r)
+                refresh=true
+                shift
+                ;;
+            --schema)
+                schema_file="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github project sync [options]
+
+Sync GitHub Project field metadata to local cache.
+
+OPTIONS:
+  --project, -p <num>   Project number (default: from config)
+  --owner, -o <org>     Organization (default: from config)
+  --refresh, -r         Force refresh even if cache is valid
+  --schema <path>       Path to agents-schema.json
+
+Caches Status and Priority field IDs and option values for use
+by set-status and other project commands.
+
+EXAMPLES:
+  bobnet github project sync
+  bobnet github project sync --project 4 --refresh
+EOF
+                return 0
+                ;;
+            *)
+                if [[ "$1" =~ ^[0-9]+$ ]]; then
+                    project="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    # Load config
+    if [[ ! -f "$schema_file" ]]; then
+        error "Schema file not found: $schema_file"
+    fi
+    
+    # Get defaults from config
+    if [[ -z "$owner" ]]; then
+        owner=$(jq -r '.github.org // empty' "$schema_file")
+        [[ -z "$owner" ]] && owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null)
+    fi
+    [[ -z "$owner" ]] && error "Could not determine organization. Use --owner or configure github.org in schema."
+    
+    if [[ -z "$project" ]]; then
+        project=$(jq -r '.github.defaultProject // empty' "$schema_file")
+    fi
+    [[ -z "$project" ]] && error "No project specified and no default configured."
+    
+    # Check cache TTL (24 hours)
+    local cached_at
+    cached_at=$(jq -r ".github.projects[\"$project\"].cachedAt // empty" "$schema_file")
+    if [[ -n "$cached_at" && "$refresh" != "true" ]]; then
+        local cached_ts now_ts
+        cached_ts=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$cached_at" "+%s" 2>/dev/null || echo 0)
+        now_ts=$(date "+%s")
+        local age=$((now_ts - cached_ts))
+        if [[ $age -lt 86400 ]]; then
+            echo "Cache valid (age: $((age / 3600))h). Use --refresh to force update."
+            return 0
+        fi
+    fi
+    
+    echo "Syncing project #$project from $owner..."
+    
+    # Get project node ID first
+    local project_id
+    project_id=$(gh project view "$project" --owner "$owner" --format json 2>/dev/null | jq -r '.id // empty')
+    if [[ -z "$project_id" ]]; then
+        error "Could not find project #$project for $owner"
+    fi
+    
+    # Get project name
+    local project_name
+    project_name=$(gh project view "$project" --owner "$owner" --format json 2>/dev/null | jq -r '.title // empty')
+    
+    echo "  Project: $project_name ($project_id)"
+    
+    # Get fields
+    local fields
+    fields=$(gh project field-list "$project" --owner "$owner" --format json 2>&1) || {
+        error "Failed to fetch fields: $fields"
+    }
+    
+    # Extract Status field
+    local status_field_id status_options
+    status_field_id=$(echo "$fields" | jq -r '.fields[] | select(.name == "Status") | .id // empty')
+    
+    if [[ -n "$status_field_id" ]]; then
+        echo "  Status field: $status_field_id"
+        status_options=$(echo "$fields" | jq -c '[.fields[] | select(.name == "Status") | .options[]? | {key: .name, value: .id}] | from_entries')
+        echo "  Status options: $(echo "$status_options" | jq -r 'keys | join(", ")')"
+    else
+        echo "  ⚠ No Status field found"
+        status_options="{}"
+    fi
+    
+    # Extract Priority field
+    local priority_field_id priority_options
+    priority_field_id=$(echo "$fields" | jq -r '.fields[] | select(.name == "Priority") | .id // empty')
+    
+    if [[ -n "$priority_field_id" ]]; then
+        echo "  Priority field: $priority_field_id"
+        priority_options=$(echo "$fields" | jq -c '[.fields[] | select(.name == "Priority") | .options[]? | {key: .name, value: .id}] | from_entries')
+        echo "  Priority options: $(echo "$priority_options" | jq -r 'keys | join(", ")')"
+    else
+        echo "  ⚠ No Priority field found"
+        priority_options="{}"
+    fi
+    
+    # Update schema file
+    local now_iso
+    now_iso=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
+    
+    local tmp_file
+    tmp_file=$(mktemp)
+    jq --arg proj "$project" \
+       --arg pid "$project_id" \
+       --arg name "$project_name" \
+       --arg sfid "$status_field_id" \
+       --argjson sopts "$status_options" \
+       --arg pfid "$priority_field_id" \
+       --argjson popts "$priority_options" \
+       --arg cached "$now_iso" \
+       '.github.projects[$proj] = {
+          "name": $name,
+          "projectId": $pid,
+          "statusField": (if $sfid != "" then {"id": $sfid, "options": $sopts} else null end),
+          "priorityField": (if $pfid != "" then {"id": $pfid, "options": $popts} else null end),
+          "cachedAt": $cached
+        }' "$schema_file" > "$tmp_file" && mv "$tmp_file" "$schema_file"
+    
+    success "Cached project metadata for #$project"
+}
+
+cmd_github_project_set_status() {
+    local issue=""
+    local status=""
+    local project=""
+    local owner=""
+    local repo=""
+    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/agents-schema.json}"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project|-p)
+                project="$2"
+                shift 2
+                ;;
+            --owner|-o)
+                owner="$2"
+                shift 2
+                ;;
+            --repo|-r)
+                repo="$2"
+                shift 2
+                ;;
+            --schema)
+                schema_file="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github project set-status <issue> <status> [options]
+
+Set the status of an issue in a GitHub Project.
+
+ARGUMENTS:
+  issue           Issue number or owner/repo#num
+  status          Status value (todo, in-progress, done, or exact name)
+
+OPTIONS:
+  --project, -p <num>   Project number (default: from config)
+  --owner, -o <org>     Organization (default: from config)
+  --repo, -r <name>     Repository name (default: from current dir)
+
+STATUS ALIASES:
+  todo, backlog, open       → "Todo"
+  in-progress, wip, doing   → "In Progress"
+  done, closed, complete    → "Done"
+
+EXAMPLES:
+  bobnet github project set-status 42 in-progress
+  bobnet github project set-status buildzero-tech/bobnet-cli#42 done
+  bobnet github project set-status 42 "In Progress" --project 4
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$issue" ]]; then
+                    issue="$1"
+                elif [[ -z "$status" ]]; then
+                    status="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    [[ -z "$issue" ]] && error "Issue number required"
+    [[ -z "$status" ]] && error "Status value required"
+    
+    # Parse issue reference (owner/repo#num or just num)
+    local issue_num
+    if [[ "$issue" =~ ^([^/]+)/([^#]+)#([0-9]+)$ ]]; then
+        owner="${BASH_REMATCH[1]}"
+        repo="${BASH_REMATCH[2]}"
+        issue_num="${BASH_REMATCH[3]}"
+    elif [[ "$issue" =~ ^#?([0-9]+)$ ]]; then
+        issue_num="${BASH_REMATCH[1]}"
+    else
+        error "Invalid issue format: $issue (use N or owner/repo#N)"
+    fi
+    
+    # Load config
+    if [[ ! -f "$schema_file" ]]; then
+        error "Schema file not found: $schema_file"
+    fi
+    
+    # Get defaults
+    [[ -z "$owner" ]] && owner=$(jq -r '.github.org // empty' "$schema_file")
+    [[ -z "$owner" ]] && owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null)
+    [[ -z "$owner" ]] && error "Could not determine organization"
+    
+    [[ -z "$repo" ]] && repo=$(gh repo view --json name -q '.name' 2>/dev/null)
+    [[ -z "$repo" ]] && error "Could not determine repository"
+    
+    [[ -z "$project" ]] && project=$(jq -r '.github.defaultProject // empty' "$schema_file")
+    [[ -z "$project" ]] && error "No project specified and no default configured"
+    
+    # Check cache, sync if needed
+    local cached_at
+    cached_at=$(jq -r ".github.projects[\"$project\"].cachedAt // empty" "$schema_file")
+    if [[ -z "$cached_at" ]]; then
+        echo "No cache for project #$project, syncing..."
+        cmd_github_project_sync --project "$project" --owner "$owner" --schema "$schema_file" || {
+            error "Failed to sync project metadata"
+        }
+    fi
+    
+    # Normalize status alias
+    local normalized_status
+    local status_lower
+    status_lower=$(echo "$status" | tr '[:upper:]' '[:lower:]')
+    case "$status_lower" in
+        todo|backlog|open)
+            normalized_status="Todo"
+            ;;
+        in-progress|wip|doing|inprogress)
+            normalized_status="In Progress"
+            ;;
+        done|closed|complete|finished)
+            normalized_status="Done"
+            ;;
+        *)
+            # Try exact match
+            normalized_status="$status"
+            ;;
+    esac
+    
+    # Get field and option IDs from cache
+    local status_field_id option_id
+    status_field_id=$(jq -r ".github.projects[\"$project\"].statusField.id // empty" "$schema_file")
+    [[ -z "$status_field_id" ]] && error "No Status field cached for project #$project"
+    
+    option_id=$(jq -r ".github.projects[\"$project\"].statusField.options[\"$normalized_status\"] // empty" "$schema_file")
+    if [[ -z "$option_id" ]]; then
+        # List available options
+        local available
+        available=$(jq -r ".github.projects[\"$project\"].statusField.options | keys | join(\", \")" "$schema_file")
+        error "Unknown status '$normalized_status'. Available: $available"
+    fi
+    
+    # Get project ID
+    local project_id
+    project_id=$(jq -r ".github.projects[\"$project\"].projectId // empty" "$schema_file")
+    [[ -z "$project_id" ]] && error "No project ID cached"
+    
+    # Find the project item for this issue
+    local issue_url="https://github.com/$owner/$repo/issues/$issue_num"
+    echo "Finding item for $owner/$repo#$issue_num in project #$project..."
+    
+    local items item_id
+    items=$(gh project item-list "$project" --owner "$owner" --format json 2>&1) || {
+        error "Failed to list project items: $items"
+    }
+    
+    item_id=$(echo "$items" | jq -r ".items[] | select(.content.url == \"$issue_url\") | .id" | head -1)
+    
+    if [[ -z "$item_id" ]]; then
+        error "Issue #$issue_num not found in project #$project. Add it first: bobnet github project add $issue_url"
+    fi
+    
+    echo "Setting status to '$normalized_status'..."
+    
+    # Update the item
+    gh project item-edit --project-id "$project_id" --id "$item_id" \
+        --field-id "$status_field_id" --single-select-option-id "$option_id" 2>&1 || {
+        error "Failed to update status"
+    }
+    
+    success "Set $owner/$repo#$issue_num → $normalized_status"
 }
 
 cmd_incident() {
