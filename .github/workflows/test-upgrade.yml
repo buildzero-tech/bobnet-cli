@@ -96,3 +96,18 @@ jobs:
         run: |
           cd ~/.bobnet/ultima-thule
           bobnet validate
+      
+      - name: Test rollback
+        run: |
+          cd ~/.bobnet/repos/bobnet-cli
+          ./test-rollback-vm.sh --verbose
+      
+      - name: Verify rollback succeeded
+        env:
+          OPENCLAW_CURRENT: ${{ vars.OPENCLAW_CURRENT || '2026.1.30' }}
+        run: |
+          ROLLED_VERSION=$(openclaw --version)
+          echo "Rolled back to: $ROLLED_VERSION"
+          
+          # Should be back to starting version
+          test "$ROLLED_VERSION" = "$OPENCLAW_CURRENT"
