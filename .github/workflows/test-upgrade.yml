@@ -99,7 +99,6 @@ jobs:
       
       - name: Test rollback
         run: |
-          cd ~/.bobnet/repos/bobnet-cli
           ./test-rollback-vm.sh --verbose
       
       - name: Verify rollback succeeded
