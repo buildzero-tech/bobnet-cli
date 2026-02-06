@@ -3035,6 +3035,7 @@ EOF
         fi
         
         # Check 2: BlueBubbles connectivity (if configured)
+        local bb_url=$(jq -r '.channels.bluebubbles.url // ""' "$config" 2>/dev/null)
         if [[ "$rollback_needed" == "false" && -n "$bb_url" ]]; then
             local bb_password=$(jq -r '.channels.bluebubbles.password // ""' "$config" 2>/dev/null)
             if curl -s --max-time 5 "${bb_url}/api/v1/server/info?password=${bb_password}" | jq -e '.status == 200' >/dev/null 2>&1; then
