@@ -2765,15 +2765,20 @@ RECOVERY_SCRIPT
 
 cmd_upgrade() {
     local target="openclaw" version="latest" dry_run=false yes=false
+    local do_rollback=false do_pin=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --openclaw) target="openclaw"; shift ;;
             --version) version="$2"; shift 2 ;;
             --dry-run) dry_run=true; shift ;;
             --yes|-y) yes=true; shift ;;
+            --rollback) do_rollback=true; shift ;;
+            --pin) do_pin=true; shift ;;
             -h|--help)
                 cat <<'EOF'
 Usage: bobnet upgrade --openclaw [--version <ver>] [--dry-run] [--yes]
+       bobnet upgrade --openclaw --rollback
+       bobnet upgrade --openclaw --pin
 
 Upgrade OpenClaw with automatic rollback on failure.
 
@@ -2782,19 +2787,25 @@ OPTIONS:
   --version <ver>    Target version (default: latest)
   --dry-run          Show what would happen without doing it
   --yes, -y          Skip confirmation prompt
+  --rollback         Rollback to pinned stable version
+  --pin              Mark current version as stable/pinned
 
 PROCESS:
-  1. Backup config
-  2. Apply config migrations (e.g., BlueBubbles allowPrivateUrl)
-  3. Stop gateway
-  4. npm install -g openclaw@VERSION
-  5. Start gateway
-  6. Run health checks (version, connectivity)
-  7. Rollback if checks fail (reinstall old version)
+  1. Pre-flight checks (disk space, npm registry)
+  2. Backup config
+  3. Apply config migrations (e.g., BlueBubbles allowPrivateUrl)
+  4. Stop gateway
+  5. npm install -g openclaw@VERSION
+  6. Start gateway
+  7. Run health checks (version, connectivity)
+  8. Rollback if checks fail (reinstall old version)
+  9. Update version tracking in BobNet
 
 EXAMPLE:
   bobnet upgrade --openclaw
   bobnet upgrade --openclaw --version 2026.2.2
+  bobnet upgrade --openclaw --rollback
+  bobnet upgrade --openclaw --pin
 EOF
                 return 0 ;;
             *) error "Unknown option: $1" ;;
@@ -2803,8 +2814,53 @@ EOF
     
     [[ "$target" != "openclaw" ]] && error "Currently only --openclaw is supported"
     
-    local VERSION_HISTORY="$CONFIG_DIR/version-history.log"
+    local VERSIONS_FILE="$BOBNET_ROOT/config/openclaw-versions.json"
     local LOCK_FILE="/tmp/bobnet-upgrade.lock"
+    
+    # Ensure versions file exists
+    if [[ ! -f "$VERSIONS_FILE" ]]; then
+        local current_ver=$(openclaw --version 2>/dev/null | head -1)
+        cat > "$VERSIONS_FILE" <<EOF
+{
+  "pinned": "$current_ver",
+  "current": "$current_ver",
+  "history": [
+    {
+      "version": "$current_ver",
+      "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+      "status": "stable",
+      "note": "Initial tracked version"
+    }
+  ]
+}
+EOF
+        echo "Created version tracking file: $VERSIONS_FILE"
+    fi
+    
+    # Handle --pin flag
+    if [[ "$do_pin" == "true" ]]; then
+        local current_ver=$(openclaw --version 2>/dev/null | head -1)
+        local tmp_file=$(mktemp)
+        jq --arg ver "$current_ver" '
+          .pinned = $ver |
+          .history = [.history[] | if .version == $ver then .status = "stable" else . end]
+        ' "$VERSIONS_FILE" > "$tmp_file" && mv "$tmp_file" "$VERSIONS_FILE"
+        success "Pinned version $current_ver as stable"
+        return 0
+    fi
+    
+    # Handle --rollback flag
+    if [[ "$do_rollback" == "true" ]]; then
+        local pinned_ver=$(jq -r '.pinned // empty' "$VERSIONS_FILE")
+        [[ -z "$pinned_ver" ]] && error "No pinned version found in $VERSIONS_FILE"
+        local current_ver=$(openclaw --version 2>/dev/null | head -1)
+        if [[ "$current_ver" == "$pinned_ver" ]]; then
+            success "Already at pinned version $pinned_ver"
+            return 0
+        fi
+        echo "Rolling back: $current_ver → $pinned_ver"
+        version="$pinned_ver"
+    fi
     
     # Acquire lock (macOS compatible)
     if [[ -f "$LOCK_FILE" ]]; then
@@ -2874,6 +2930,30 @@ EOF
         echo ""
         read -p "Continue? [y/N] " -r
         [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled"; return 0; }
+    fi
+    
+    echo ""
+    
+    # Pre-flight checks
+    echo "--- Pre-flight checks ---"
+    
+    # Check disk space (need at least 500MB for npm install)
+    local free_space_mb=$(df -m "$HOME" | tail -1 | awk '{print $4}')
+    if [[ "$free_space_mb" -lt 500 ]]; then
+        error "Insufficient disk space: ${free_space_mb}MB free (need 500MB)"
+    fi
+    success "Disk space: ${free_space_mb}MB free"
+    
+    # Check npm registry reachable
+    if ! npm ping &>/dev/null; then
+        error "npm registry not reachable"
+    fi
+    success "npm registry reachable"
+    
+    # Check for active agent sessions (warn only)
+    local active_sessions=$(openclaw sessions list --format json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+    if [[ "$active_sessions" -gt 0 ]]; then
+        warn "Active sessions detected: $active_sessions (will be interrupted)"
     fi
     
     echo ""
@@ -3063,8 +3143,18 @@ EOF
     echo ""
     success "=== Upgrade complete: $current_version → $target_version ==="
     
-    # Record in version history
-    echo "$(date -Iseconds): $current_version → $target_version (success)" >> "$VERSION_HISTORY"
+    # Record in version history (BobNet tracked)
+    local now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local tmp_file=$(mktemp)
+    jq --arg ver "$target_version" --arg ts "$now_iso" --arg from "$current_version" '
+      .current = $ver |
+      .history = [{
+        "version": $ver,
+        "installedAt": $ts,
+        "status": "installed",
+        "note": "Upgraded from " + $from
+      }] + .history
+    ' "$VERSIONS_FILE" > "$tmp_file" && mv "$tmp_file" "$VERSIONS_FILE"
     
     # Save success report
     local success_report="$CONFIG_DIR/upgrade-success-$(date +%Y%m%d_%H%M%S).log"
@@ -3078,14 +3168,18 @@ EOF
         diff <(jq -S . "$backup" 2>/dev/null) <(jq -S . "$config" 2>/dev/null) || echo "(no changes)"
     } > "$success_report" 2>&1
     
+    # Commit version tracking to git
+    (cd "$BOBNET_ROOT" && git add config/openclaw-versions.json && git commit -m "[Bob] chore: track OpenClaw upgrade $current_version → $target_version" 2>/dev/null) || true
+    
     echo ""
     echo "Report: $success_report"
-    echo "History: $VERSION_HISTORY"
+    echo "Versions: $VERSIONS_FILE"
+    echo ""
+    echo "Post-upgrade:"
+    echo "  bobnet upgrade --openclaw --pin    # Mark as stable"
     echo ""
     echo "Rollback (if needed):"
-    echo "  npm install -g openclaw@$current_version"
-    echo "  cp $backup $config"
-    echo "  launchctl kickstart -k gui/\$(id -u)/ai.openclaw.gateway"
+    echo "  bobnet upgrade --openclaw --rollback"
 }
 
 
