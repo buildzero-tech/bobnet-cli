@@ -92,7 +92,7 @@ main() {
     log "--- Running Rollback ---"
     cd "$repo_dir"
     
-    if bobnet upgrade --openclaw --rollback; then
+    if bobnet upgrade --openclaw --rollback --yes; then
         success "Rollback completed"
     else
         error "Rollback failed"
