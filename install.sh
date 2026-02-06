@@ -52,12 +52,12 @@ install_cli() {
 set -euo pipefail
 BOBNET_ROOT="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
 # Schema location (try new name, fall back to old)
-if [[ -f "$BOBNET_ROOT/config/agents-schema.json" ]]; then
-    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.json}"
+if [[ -f "$BOBNET_ROOT/config/bobnet.json" ]]; then
+    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/bobnet.json}"
 elif [[ -f "$BOBNET_ROOT/config/agents-schema.v3.json" ]]; then
     AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.v3.json}"
 else
-    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.json}"
+    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/bobnet.json}"
 fi
 command -v jq &>/dev/null || { echo "jq required" >&2; exit 1; }
 get_all_agents() { jq -r '.agents | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""; }
@@ -377,7 +377,7 @@ cmd_agent() {
             # Check agent in schema
             local schema_name="$name"
             if ! jq -e --arg a "$schema_name" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
-                error "Agent '$name' not in schema. Add to agents-schema.json first."
+                error "Agent '$name' not in schema. Add to bobnet.json first."
             fi
             
             local ws=$(get_workspace "$schema_name")
@@ -1143,7 +1143,7 @@ set -euo pipefail
 
 # Find BOBNET_ROOT (may not exist)
 if [[ -n "${BOBNET_ROOT:-}" ]]; then :
-elif [[ -f "./config/agents-schema.json" ]]; then BOBNET_ROOT="$(pwd)"
+elif [[ -f "./config/bobnet.json" ]]; then BOBNET_ROOT="$(pwd)"
 elif [[ -d "$HOME/.bobnet/ultima-thule" ]]; then BOBNET_ROOT="$HOME/.bobnet/ultima-thule"
 else BOBNET_ROOT=""; fi
 
@@ -1277,7 +1277,7 @@ if [[ -z "$BOBNET_ROOT" ]]; then
 fi
 
 export BOBNET_ROOT
-export AGENTS_SCHEMA="$BOBNET_ROOT/config/agents-schema.json"
+export AGENTS_SCHEMA="$BOBNET_ROOT/config/bobnet.json"
 source "$HOME/.local/lib/bobnet/agents.sh"
 source "$HOME/.local/lib/bobnet/bobnet.sh"
 bobnet_main "$@"

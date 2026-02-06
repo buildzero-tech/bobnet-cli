@@ -60,7 +60,7 @@ check_agents_symlink() {
 
 # Global variables and utilities
 BOBNET_ROOT="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
-AGENTS_SCHEMA="$BOBNET_ROOT/config/agents-schema.json"
+AGENTS_SCHEMA="$BOBNET_ROOT/config/bobnet.json"
 
 # Schema helper functions
 get_all_agents() {
@@ -1728,7 +1728,7 @@ EOF
 #######################################
 _proxy_update_agent_files() {
     local enabled="$1"
-    local schema_file="$BOBNET_ROOT/config/agents-schema.json"
+    local schema_file="$BOBNET_ROOT/config/bobnet.json"
     local agents=$(jq -r '.agents | keys[]' "$schema_file" | grep -v '^main$')
     
     for agent in $agents; do
@@ -1811,7 +1811,7 @@ PROXYEOF
 
 cmd_proxy() {
     local subcmd="${1:-status}"
-    local schema_file="$BOBNET_ROOT/config/agents-schema.json"
+    local schema_file="$BOBNET_ROOT/config/bobnet.json"
     
     case "$subcmd" in
         status)
@@ -2451,7 +2451,7 @@ AGENT USAGE:
   groupId=$(bobnet groups get openclaw)
   message send --target "$groupId" --message "Update"
 
-Groups are stored in agents-schema.json and sync with 'bobnet sync'.
+Groups are stored in bobnet.json and sync with 'bobnet sync'.
 EOF
             ;;
         *)
@@ -3744,7 +3744,7 @@ cmd_github_project_sync() {
     local project=""
     local owner=""
     local refresh=false
-    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/agents-schema.json}"
+    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/bobnet.json}"
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -3774,7 +3774,7 @@ OPTIONS:
   --project, -p <num>   Project number (default: from config)
   --owner, -o <org>     Organization (default: from config)
   --refresh, -r         Force refresh even if cache is valid
-  --schema <path>       Path to agents-schema.json
+  --schema <path>       Path to bobnet.json
 
 Caches Status and Priority field IDs and option values for use
 by set-status and other project commands.
@@ -3903,7 +3903,7 @@ cmd_github_project_set_status() {
     local project=""
     local owner=""
     local repo=""
-    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/agents-schema.json}"
+    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/bobnet.json}"
     
     while [[ $# -gt 0 ]]; do
         case "$1" in

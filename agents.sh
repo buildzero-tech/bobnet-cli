@@ -2,12 +2,12 @@
 set -euo pipefail
 BOBNET_ROOT="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
 # Schema location (try new name, fall back to old)
-if [[ -f "$BOBNET_ROOT/config/agents-schema.json" ]]; then
-    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.json}"
+if [[ -f "$BOBNET_ROOT/config/bobnet.json" ]]; then
+    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/bobnet.json}"
 elif [[ -f "$BOBNET_ROOT/config/agents-schema.v3.json" ]]; then
     AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.v3.json}"
 else
-    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/agents-schema.json}"
+    AGENTS_SCHEMA="${AGENTS_SCHEMA:-$BOBNET_ROOT/config/bobnet.json}"
 fi
 command -v jq &>/dev/null || { echo "jq required" >&2; exit 1; }
 get_all_agents() { jq -r '.agents | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""; }
