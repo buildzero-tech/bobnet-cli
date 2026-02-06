@@ -3466,6 +3466,251 @@ EOF
     fi
 }
 
+cmd_docs() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        roadmap)
+            cmd_docs_roadmap "$@"
+            ;;
+        changelog)
+            cmd_docs_changelog "$@"
+            ;;
+        release)
+            cmd_docs_release "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet docs <command> [options]
+
+Documentation generation from git and GitHub data.
+
+COMMANDS:
+  roadmap                 Generate ROADMAP.md from GitHub milestones
+  changelog [version]     Generate CHANGELOG.md from commits
+  release <version>       Generate release notes
+
+EXAMPLES:
+  bobnet docs roadmap
+  bobnet docs changelog
+  bobnet docs release v1.5.0
+
+See 'bobnet docs <command> help' for more information.
+EOF
+            ;;
+        *)
+            error "Unknown docs command: $subcmd (try 'bobnet docs help')"
+            ;;
+    esac
+}
+
+cmd_docs_roadmap() {
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        cat <<'EOF'
+Usage: bobnet docs roadmap [options]
+
+Generate ROADMAP.md from GitHub milestones and projects.
+
+OUTPUT:
+  ROADMAP.md with milestones grouped by quarter/release
+
+EXAMPLES:
+  bobnet docs roadmap
+  bobnet docs roadmap > ROADMAP.md
+EOF
+        return 0
+    fi
+    
+    echo "# Product Roadmap"
+    echo
+    echo "*Last updated: $(date +%Y-%m-%d) (auto-generated via \`bobnet docs roadmap\`)*"
+    echo
+    
+    # Fetch all milestones
+    local milestones
+    milestones=$(gh api repos/:owner/:repo/milestones --jq '.[] | {title:.title, due:.due_on, state:.state, open:.open_issues, closed:.closed_issues, description:.description}' 2>/dev/null)
+    
+    if [[ -z "$milestones" ]]; then
+        echo "No milestones found."
+        return 0
+    fi
+    
+    # Group by year/quarter or just list
+    echo "$milestones" | jq -r '. | "## \(.title)\n\n**Due:** \(.due // "No due date")  \n**Status:** \(.state)  \n**Progress:** \(.closed)/\((.open + .closed)) issues\n\n\(.description // "No description")\n"'
+}
+
+cmd_docs_changelog() {
+    local version="${1:-}"
+    
+    if [[ "$version" == "-h" || "$version" == "--help" ]]; then
+        cat <<'EOF'
+Usage: bobnet docs changelog [version]
+
+Generate CHANGELOG.md from conventional commits.
+
+Follows Keep a Changelog format.
+
+OPTIONS:
+  version    Version to generate changelog for (default: unreleased)
+
+EXAMPLES:
+  bobnet docs changelog              # Unreleased changes
+  bobnet docs changelog v1.5.0       # Changes for specific version
+EOF
+        return 0
+    fi
+    
+    echo "# Changelog"
+    echo
+    echo "All notable changes to this project are documented here."
+    echo
+    
+    if [[ -z "$version" ]]; then
+        echo "## [Unreleased]"
+        echo
+        
+        # Get commits since last tag
+        local last_tag
+        last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+        
+        local commit_range
+        if [[ -n "$last_tag" ]]; then
+            commit_range="$last_tag..HEAD"
+        else
+            commit_range="HEAD"
+        fi
+        
+        # Group by type
+        echo "### Added"
+        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /'
+        echo
+        
+        echo "### Changed"
+        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /'
+        echo
+        
+        echo "### Fixed"
+        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /'
+        echo
+    else
+        # Generate for specific version
+        local prev_tag
+        prev_tag=$(git describe --tags --abbrev=0 "$version^" 2>/dev/null || echo "")
+        
+        echo "## [$version] - $(git log -1 --format=%ai $version | cut -d' ' -f1)"
+        echo
+        
+        local commit_range
+        if [[ -n "$prev_tag" ]]; then
+            commit_range="$prev_tag..$version"
+        else
+            commit_range="$version"
+        fi
+        
+        echo "### Added"
+        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /'
+        echo
+        
+        echo "### Changed"
+        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /'
+        echo
+        
+        echo "### Fixed"
+        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /'
+        echo
+        
+        if [[ -n "$prev_tag" ]]; then
+            echo "**Full Changelog:** https://github.com/:owner/:repo/compare/$prev_tag...$version"
+        fi
+    fi
+}
+
+cmd_docs_release() {
+    local version="$1"
+    
+    if [[ "$version" == "-h" || "$version" == "--help" || -z "$version" ]]; then
+        cat <<'EOF'
+Usage: bobnet docs release <version>
+
+Generate release notes for a version.
+
+Combines:
+- Conventional commit messages
+- Linked GitHub issues
+- Contributors
+
+OPTIONS:
+  version    Version tag (e.g., v1.5.0)
+
+EXAMPLES:
+  bobnet docs release v1.5.0
+  bobnet docs release v1.5.0 > releases/v1.5.0.md
+EOF
+        return 0
+    fi
+    
+    echo "# Release Notes: $version"
+    echo
+    echo "**Released:** $(git log -1 --format=%ai $version 2>/dev/null | cut -d' ' -f1 || date +%Y-%m-%d)"
+    echo
+    
+    # Get previous tag
+    local prev_tag
+    prev_tag=$(git describe --tags --abbrev=0 "$version^" 2>/dev/null || echo "")
+    
+    local commit_range
+    if [[ -n "$prev_tag" ]]; then
+        commit_range="$prev_tag..$version"
+        echo "**Changes since $prev_tag**"
+    else
+        commit_range="$version"
+        echo "**Initial release**"
+    fi
+    echo
+    
+    # Features
+    local features
+    features=$(git log --format="%s" "$commit_range" | grep "feat:")
+    if [[ -n "$features" ]]; then
+        echo "## ✨ Features"
+        echo
+        echo "$features" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /'
+        echo
+    fi
+    
+    # Fixes
+    local fixes
+    fixes=$(git log --format="%s" "$commit_range" | grep "fix:")
+    if [[ -n "$fixes" ]]; then
+        echo "## 🐛 Bug Fixes"
+        echo
+        echo "$fixes" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /'
+        echo
+    fi
+    
+    # Other changes
+    local other
+    other=$(git log --format="%s" "$commit_range" | grep -v "feat:\|fix:")
+    if [[ -n "$other" ]]; then
+        echo "## 🔧 Other Changes"
+        echo
+        echo "$other" | sed 's/^\[.*\] //; s/^[^:]*: */- /'
+        echo
+    fi
+    
+    # Contributors
+    echo "## 👥 Contributors"
+    echo
+    git log --format="%aN <%aE>" "$commit_range" | sort -u | sed 's/^/- /'
+    echo
+    
+    # Link
+    if [[ -n "$prev_tag" ]]; then
+        echo "**Full Changelog:** https://github.com/:owner/:repo/compare/$prev_tag...$version"
+    fi
+}
+
 cmd_todo() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -3825,6 +4070,7 @@ COMMANDS:
   git [cmd]           Git attribution commands (commit, check)
   github [cmd]        GitHub integration (issues, milestones)
   todo [cmd]          Todo management and GitHub sync (list, status, sync)
+  docs [cmd]          Documentation generation (roadmap, changelog, release)
   signal [cmd]        Signal backup/restore
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
@@ -3859,6 +4105,7 @@ bobnet_main() {
         git) shift; cmd_git "$@" ;;
         github) shift; cmd_github "$@" ;;
         todo) shift; cmd_todo "$@" ;;
+        docs) shift; cmd_docs "$@" ;;
         signal) shift; cmd_signal "$@" ;;
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
