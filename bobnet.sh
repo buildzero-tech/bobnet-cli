@@ -2764,7 +2764,7 @@ RECOVERY_SCRIPT
 
 
 cmd_upgrade() {
-    local target="openclaw" version="latest" dry_run=false yes=false
+    local target="openclaw" version="latest" dry_run=false yes=false force=false
     local do_rollback=false do_pin=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2772,6 +2772,7 @@ cmd_upgrade() {
             --version) version="$2"; shift 2 ;;
             --dry-run) dry_run=true; shift ;;
             --yes|-y) yes=true; shift ;;
+            --force|-f) force=true; shift ;;
             --rollback) do_rollback=true; shift ;;
             --pin) do_pin=true; shift ;;
             -h|--help)
@@ -2787,6 +2788,7 @@ OPTIONS:
   --version <ver>    Target version (default: latest)
   --dry-run          Show what would happen without doing it
   --yes, -y          Skip confirmation prompt
+  --force, -f        Skip BobNet CLI version check (not recommended)
   --rollback         Rollback to pinned stable version
   --pin              Mark current version as stable/pinned
 
@@ -2872,6 +2874,67 @@ EOF
     fi
     echo $$ > "$LOCK_FILE"
     trap "rm -f '$LOCK_FILE'" EXIT
+    
+    # Check BobNet CLI version (unless --force)
+    if [[ "$force" != "true" && "$do_rollback" != "true" ]]; then
+        local cli_version=$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")
+        local remote_version=""
+        
+        # Try to fetch latest version from GitHub
+        if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+            # Use gh CLI if available and authenticated
+            remote_version=$(gh api repos/buildzero-tech/bobnet-cli/contents/install.sh --jq '.content' 2>/dev/null | base64 -d | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
+        elif command -v curl &>/dev/null; then
+            # Fallback to curl
+            remote_version=$(curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" 2>/dev/null | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
+        fi
+        
+        if [[ -n "$remote_version" && "$cli_version" != "$remote_version" && "$cli_version" != "unknown" ]]; then
+            echo ""
+            echo -e "${YELLOW}⚠ BobNet CLI is outdated${NC}"
+            echo "  Current:  v$cli_version"
+            echo "  Latest:   v$remote_version"
+            echo ""
+            echo "  The latest version includes important fixes:"
+            echo "  - Cross-platform gateway support (Linux/macOS)"
+            echo "  - Health check improvements"
+            echo "  - Version tracking fixes"
+            echo ""
+            echo -e "${YELLOW}Recommendation: Update BobNet CLI first${NC}"
+            echo "  bobnet update"
+            echo ""
+            
+            # Calculate version difference
+            local current_major=$(echo "$cli_version" | cut -d. -f1)
+            local current_minor=$(echo "$cli_version" | cut -d. -f2)
+            local remote_major=$(echo "$remote_version" | cut -d. -f1)
+            local remote_minor=$(echo "$remote_version" | cut -d. -f2)
+            
+            # Require update if 2+ minor versions behind
+            local version_diff=$((remote_minor - current_minor))
+            if [[ "$version_diff" -ge 2 || "$remote_major" -gt "$current_major" ]]; then
+                echo -e "${RED}Error: BobNet CLI is too old ($version_diff versions behind)${NC}"
+                echo "Please update before upgrading OpenClaw:"
+                echo "  bobnet update"
+                echo ""
+                echo "Or use --force to skip this check (not recommended)"
+                return 1
+            fi
+            
+            # Just warn if 1 version behind
+            if [[ "$yes" != "true" ]]; then
+                read -p "Continue anyway? [y/N] " -r
+                [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled. Run 'bobnet update' first."; return 0; }
+            else
+                echo "Continuing with outdated CLI (--yes flag)"
+            fi
+            echo ""
+        elif [[ -z "$remote_version" ]]; then
+            warn "Could not check BobNet CLI version (GitHub unreachable)"
+            echo "  Proceeding anyway..."
+            echo ""
+        fi
+    fi
     
     echo "=== BobNet OpenClaw Upgrade ==="
     echo ""
