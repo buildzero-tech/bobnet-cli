@@ -2763,6 +2763,58 @@ RECOVERY_SCRIPT
 }
 
 
+# Basic config validation for upgrade pre-flight
+# TODO: Replace with `openclaw config validate --target-version` when available upstream
+# See: https://github.com/openclaw/openclaw/issues/XXXX
+validate_config_for_upgrade() {
+    local config="$1"
+    local target_version="$2"
+    local warnings=0
+    
+    [[ ! -f "$config" ]] && { error "Config file not found: $config"; return 1; }
+    
+    echo "  Validating config for upgrade to $target_version..."
+    
+    # Check 1: Valid JSON
+    if ! jq empty "$config" 2>/dev/null; then
+        error "Config is not valid JSON"
+        return 1
+    fi
+    
+    # Check 2: Known incompatible properties (version-specific)
+    # Example: BlueBubbles allowPrivateUrl was added but not supported in 2026.2.3-1
+    local bluebubbles_url=$(jq -r '.channels.bluebubbles.allowPrivateUrl // empty' "$config" 2>/dev/null)
+    if [[ -n "$bluebubbles_url" && "$target_version" == "2026.2.3-1" ]]; then
+        warn "channels.bluebubbles.allowPrivateUrl not supported in $target_version"
+        warn "  This property will be ignored (safe to continue)"
+        ((warnings++))
+    fi
+    
+    # Check 3: Required fields present
+    local agents_list=$(jq -r '.agents.list // empty' "$config" 2>/dev/null)
+    if [[ -z "$agents_list" || "$agents_list" == "null" ]]; then
+        warn "agents.list is empty or missing (gateway may not start)"
+        ((warnings++))
+    fi
+    
+    # Check 4: Config file size (very large configs may indicate corruption)
+    local config_size=$(wc -c < "$config")
+    if [[ $config_size -gt 1048576 ]]; then  # 1MB
+        warn "Config file is unusually large (${config_size} bytes)"
+        warn "  This may indicate corruption or excessive data"
+        ((warnings++))
+    fi
+    
+    # Summary
+    if [[ $warnings -eq 0 ]]; then
+        success "Config validation passed (basic checks)"
+    else
+        warn "Config validation completed with $warnings warning(s)"
+        warn "  Proceeding with upgrade (use --force to skip this check)"
+    fi
+    
+    return 0  # Non-blocking for now
+}
 cmd_upgrade() {
     local target="openclaw" version="latest" dry_run=false yes=false force=false
     local do_rollback=false do_pin=false
@@ -2795,13 +2847,14 @@ OPTIONS:
 PROCESS:
   1. Pre-flight checks (disk space, npm registry)
   2. Backup config
-  3. Apply config migrations (e.g., BlueBubbles allowPrivateUrl)
-  4. Stop gateway
-  5. npm install -g openclaw@VERSION
-  6. Start gateway
-  7. Run health checks (version, connectivity)
-  8. Rollback if checks fail (reinstall old version)
-  9. Update version tracking in BobNet
+  3. Apply config migrations (if needed)
+  4. Validate config for target version (basic checks)
+  5. Stop gateway
+  6. npm install -g openclaw@VERSION
+  7. Start gateway
+  8. Run health checks (version, connectivity)
+  9. Rollback if checks fail (reinstall old version)
+  10. Update version tracking in BobNet
 
 EXAMPLE:
   bobnet upgrade --openclaw
@@ -3032,10 +3085,14 @@ EOF
     # Step 2: Apply config migrations before switching
     echo ""
     echo "--- Step 2: Apply config migrations ---"
-    # TODO: Add config schema validation (openclaw config validate --target-version)
-    # Previously added allowPrivateUrl for BlueBubbles, but that property isn't
-    # supported in 2026.2.3-1. Let openclaw doctor handle config fixes post-upgrade.
     echo "  No migrations needed (deferred to post-upgrade doctor)"
+    
+    # Step 2.5: Validate config for target version
+    echo ""
+    echo "--- Step 2.5: Config validation ---"
+    if ! validate_config_for_upgrade "$config" "$target_version"; then
+        error "Config validation failed (use --force to skip)"
+    fi
     
     # Step 3: Stop gateway before npm install
     echo ""
