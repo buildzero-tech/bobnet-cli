@@ -3419,6 +3419,9 @@ EOF
                 set-status)
                     cmd_github_project_set_status "$@"
                     ;;
+                set-priority)
+                    cmd_github_project_set_priority "$@"
+                    ;;
                 help|-h|--help)
                     cat <<'EOF'
 Usage: bobnet github project <command> [options]
@@ -3431,7 +3434,8 @@ COMMANDS:
   add <issue-url>      Add issue to default project
   status [project-num] Show project status
   sync [--project N]   Sync project field metadata to cache
-  set-status <issue> <status> [--project N]  Set issue status in project
+  set-status <issue> <status> [--project N]    Set issue status in project
+  set-priority <issue> <priority> [--project N] Set issue priority in project
 
 EXAMPLES:
   bobnet github project create "Q1 Work"
@@ -3440,6 +3444,8 @@ EXAMPLES:
   bobnet github project sync
   bobnet github project set-status 42 in-progress
   bobnet github project set-status owner/repo#42 done
+  bobnet github project set-priority 42 high
+  bobnet github project set-priority owner/repo#15 medium
 EOF
                     ;;
                 *)
@@ -4273,6 +4279,182 @@ EOF
     success "Set $owner/$repo#$issue_num → $normalized_status"
 }
 
+cmd_github_project_set_priority() {
+    local issue=""
+    local priority=""
+    local project=""
+    local owner=""
+    local repo=""
+    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/bobnet.json}"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project|-p)
+                project="$2"
+                shift 2
+                ;;
+            --owner|-o)
+                owner="$2"
+                shift 2
+                ;;
+            --repo|-r)
+                repo="$2"
+                shift 2
+                ;;
+            --schema)
+                schema_file="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'HELPDOC'
+Usage: bobnet github project set-priority <issue> <priority> [options]
+
+Set the priority of an issue in a GitHub Project.
+
+ARGUMENTS:
+  issue           Issue number or owner/repo#num
+  priority        Priority value (high, medium, low, deferred, waiting)
+
+OPTIONS:
+  --project, -p <num>   Project number (default: from config)
+  --owner, -o <org>     Organization (default: from config)
+  --repo, -r <name>     Repository name (default: from current dir)
+
+PRIORITY VALUES:
+  high, h, p0, critical    → "High"
+  medium, med, m, p1       → "Medium"
+  low, l, p2               → "Low"
+  deferred, defer, later   → "Deferred"
+  waiting, blocked, wait   → "Waiting"
+
+EXAMPLES:
+  bobnet github project set-priority 42 high
+  bobnet github project set-priority buildzero-tech/bobnet-cli#42 medium
+  bobnet github project set-priority 42 deferred --project 4
+HELPDOC
+                return 0
+                ;;
+            *)
+                if [[ -z "$issue" ]]; then
+                    issue="$1"
+                elif [[ -z "$priority" ]]; then
+                    priority="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    [[ -z "$issue" ]] && error "Issue number required"
+    [[ -z "$priority" ]] && error "Priority value required"
+    
+    # Parse issue reference (owner/repo#num or just num)
+    local issue_num
+    if [[ "$issue" =~ ^([^/]+)/([^#]+)#([0-9]+)$ ]]; then
+        owner="${BASH_REMATCH[1]}"
+        repo="${BASH_REMATCH[2]}"
+        issue_num="${BASH_REMATCH[3]}"
+    elif [[ "$issue" =~ ^#?([0-9]+)$ ]]; then
+        issue_num="${BASH_REMATCH[1]}"
+    else
+        error "Invalid issue format: $issue (use N or owner/repo#N)"
+    fi
+    
+    # Load config
+    if [[ ! -f "$schema_file" ]]; then
+        error "Schema file not found: $schema_file"
+    fi
+    
+    # Get defaults
+    [[ -z "$owner" ]] && owner=$(jq -r '.github.org // empty' "$schema_file")
+    [[ -z "$owner" ]] && owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null)
+    [[ -z "$owner" ]] && error "Could not determine organization"
+    
+    [[ -z "$repo" ]] && repo=$(gh repo view --json name -q '.name' 2>/dev/null)
+    [[ -z "$repo" ]] && error "Could not determine repository"
+    
+    [[ -z "$project" ]] && project=$(jq -r '.github.defaultProject // empty' "$schema_file")
+    [[ -z "$project" ]] && error "No project specified and no default configured"
+    
+    # Check cache, sync if needed
+    local cached_at
+    cached_at=$(jq -r ".github.projects[\"$project\"].cachedAt // empty" "$schema_file")
+    if [[ -z "$cached_at" ]]; then
+        echo "No cache for project #$project, syncing..."
+        cmd_github_project_sync --project "$project" --owner "$owner" --schema "$schema_file" || {
+            error "Failed to sync project metadata"
+        }
+    fi
+    
+    # Normalize priority alias
+    local normalized_priority
+    local priority_lower
+    priority_lower=$(echo "$priority" | tr '[:upper:]' '[:lower:]')
+    case "$priority_lower" in
+        high|h|p0|critical)
+            normalized_priority="High"
+            ;;
+        medium|med|m|p1)
+            normalized_priority="Medium"
+            ;;
+        low|l|p2)
+            normalized_priority="Low"
+            ;;
+        deferred|defer|later)
+            normalized_priority="Deferred"
+            ;;
+        waiting|blocked|wait)
+            normalized_priority="Waiting"
+            ;;
+        *)
+            # Try exact match
+            normalized_priority="$priority"
+            ;;
+    esac
+    
+    # Get field and option IDs from cache
+    local priority_field_id option_id
+    priority_field_id=$(jq -r ".github.projects[\"$project\"].priorityField.id // empty" "$schema_file")
+    [[ -z "$priority_field_id" ]] && error "No Priority field cached for project #$project"
+    
+    option_id=$(jq -r ".github.projects[\"$project\"].priorityField.options[\"$normalized_priority\"] // empty" "$schema_file")
+    if [[ -z "$option_id" ]]; then
+        # List available options
+        local available
+        available=$(jq -r ".github.projects[\"$project\"].priorityField.options | keys | join(\", \")" "$schema_file")
+        error "Unknown priority '$normalized_priority'. Available: $available"
+    fi
+    
+    # Get project ID
+    local project_id
+    project_id=$(jq -r ".github.projects[\"$project\"].projectId // empty" "$schema_file")
+    [[ -z "$project_id" ]] && error "No project ID cached"
+    
+    # Find the project item for this issue
+    local issue_url="https://github.com/$owner/$repo/issues/$issue_num"
+    echo "Finding item for $owner/$repo#$issue_num in project #$project..."
+    
+    local items item_id
+    items=$(gh project item-list "$project" --owner "$owner" --format json 2>&1) || {
+        error "Failed to list project items: $items"
+    }
+    
+    item_id=$(echo "$items" | jq -r ".items[] | select(.content.url == \"$issue_url\") | .id" | head -1)
+    
+    if [[ -z "$item_id" ]]; then
+        error "Issue #$issue_num not found in project #$project. Add it first: bobnet github project add $issue_url"
+    fi
+    
+    echo "Setting priority to '$normalized_priority'..."
+    
+    # Update the item
+    gh project item-edit --project-id "$project_id" --id "$item_id" \
+        --field-id "$priority_field_id" --single-select-option-id "$option_id" 2>&1 || {
+        error "Failed to update priority"
+    }
+    
+    success "Set $owner/$repo#$issue_num → Priority: $normalized_priority"
+}
 cmd_incident() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
