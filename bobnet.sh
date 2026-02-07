@@ -60,20 +60,20 @@ check_agents_symlink() {
 
 # Global variables and utilities
 BOBNET_ROOT="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
-AGENTS_SCHEMA="$BOBNET_ROOT/config/bobnet.json"
+BOBNET_SCHEMA="$BOBNET_ROOT/config/bobnet.json"
 
 # Schema helper functions
 get_all_agents() {
-    jq -r '.agents | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""
+    jq -r '.agents | keys[]' "$BOBNET_SCHEMA" 2>/dev/null || echo ""
 }
 
 get_all_scopes() {
-    jq -r '.scopes | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""
+    jq -r '.scopes | keys[]' "$BOBNET_SCHEMA" 2>/dev/null || echo ""
 }
 
 get_agents_by_scope() {
     local scope="$1"
-    jq -r --arg s "$scope" '.agents | to_entries[] | select(.value.scope == $s) | .key' "$AGENTS_SCHEMA" 2>/dev/null || echo ""
+    jq -r --arg s "$scope" '.agents | to_entries[] | select(.value.scope == $s) | .key' "$BOBNET_SCHEMA" 2>/dev/null || echo ""
 }
 
 get_workspace() {
@@ -89,19 +89,19 @@ get_agent_dir() {
 get_spawn_permissions() {
     local agent="$1"
     # Check for agent-specific permissions first, then fall back to default
-    local agent_perms=$(jq -c --arg a "$agent" '.spawning.permissions[$a]' "$AGENTS_SCHEMA" 2>/dev/null)
+    local agent_perms=$(jq -c --arg a "$agent" '.spawning.permissions[$a]' "$BOBNET_SCHEMA" 2>/dev/null)
     if [[ "$agent_perms" != "null" && "$agent_perms" != "[]" ]]; then
         echo "$agent_perms"
     else
         # Use default permissions
-        local default_perms=$(jq -c '.spawning.permissions.default' "$AGENTS_SCHEMA" 2>/dev/null)
+        local default_perms=$(jq -c '.spawning.permissions.default' "$BOBNET_SCHEMA" 2>/dev/null)
         [[ "$default_perms" == "null" || "$default_perms" == "[]" ]] && echo "" || echo "$default_perms"
     fi
 }
 
 get_agent_model() {
     local agent="$1"
-    jq -r --arg a "$agent" '.agents[$a].model // empty' "$AGENTS_SCHEMA" 2>/dev/null
+    jq -r --arg a "$agent" '.agents[$a].model // empty' "$BOBNET_SCHEMA" 2>/dev/null
 }
 
 cmd_status() {
@@ -148,7 +148,7 @@ EOF
     local list='[' first=true
     
     for agent in $(get_all_agents); do
-        local is_default=$(jq -r --arg a "$agent" '.agents[$a].default // false' "$AGENTS_SCHEMA")
+        local is_default=$(jq -r --arg a "$agent" '.agents[$a].default // false' "$BOBNET_SCHEMA")
         local spawn_perms=$(get_spawn_permissions "$agent")
         local model=$(get_agent_model "$agent")
         $first || list+=','
@@ -162,7 +162,7 @@ EOF
     done
     list+=']'
     
-    local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$AGENTS_SCHEMA" 2>/dev/null || echo '[]')
+    local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$BOBNET_SCHEMA" 2>/dev/null || echo '[]')
     local bind_count=$(echo "$bindings" | jq length)
     
     $claw config set agents.defaults.workspace "$(get_workspace bob)"
@@ -172,8 +172,8 @@ EOF
     [[ "$bind_count" -gt 0 ]] && $claw config set bindings "$bindings" --json && success "bindings: $bind_count"
     
     # Apply channel configs from schema
-    for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
-        local channel_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
+    for channel in $(jq -r '.channels // {} | keys[]' "$BOBNET_SCHEMA" 2>/dev/null); do
+        local channel_config=$(jq -c ".channels.$channel" "$BOBNET_SCHEMA")
         $claw config set "channels.$channel" "$channel_config" --json 2>/dev/null && success "channel: $channel"
     done
     
@@ -420,7 +420,7 @@ cmd_agent() {
             
             # Check if agent exists in schema
             local in_schema=false
-            if jq -e --arg a "$name" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+            if jq -e --arg a "$name" '.agents[$a]' "$BOBNET_SCHEMA" >/dev/null 2>&1; then
                 in_schema=true
             fi
             
@@ -429,8 +429,8 @@ cmd_agent() {
                 [[ -z "$scope" ]] && error "Agent '$name' not in schema. Use --scope to add it."
                 
                 # Validate scope exists
-                if ! jq -e --arg s "$scope" '.scopes[$s]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
-                    error "Scope '$scope' not found. Available: $(jq -r '.scopes | keys | join(", ")' "$AGENTS_SCHEMA")"
+                if ! jq -e --arg s "$scope" '.scopes[$s]' "$BOBNET_SCHEMA" >/dev/null 2>&1; then
+                    error "Scope '$scope' not found. Available: $(jq -r '.scopes | keys | join(", ")' "$BOBNET_SCHEMA")"
                 fi
                 
                 # Build agent entry
@@ -440,15 +440,15 @@ cmd_agent() {
                 agent_json="$agent_json}"
                 
                 # Add to schema
-                jq --arg name "$name" --argjson entry "$agent_json" '.agents[$name] = $entry' "$AGENTS_SCHEMA" > "$AGENTS_SCHEMA.tmp"
-                mv "$AGENTS_SCHEMA.tmp" "$AGENTS_SCHEMA"
+                jq --arg name "$name" --argjson entry "$agent_json" '.agents[$name] = $entry' "$BOBNET_SCHEMA" > "$BOBNET_SCHEMA.tmp"
+                mv "$BOBNET_SCHEMA.tmp" "$BOBNET_SCHEMA"
                 success "Added '$name' to schema (scope: $scope)"
             else
                 echo "  Agent '$name' already in schema"
                 # Update description if provided
                 if [[ -n "$description" ]]; then
-                    jq --arg name "$name" --arg desc "$description" '.agents[$name].description = $desc' "$AGENTS_SCHEMA" > "$AGENTS_SCHEMA.tmp"
-                    mv "$AGENTS_SCHEMA.tmp" "$AGENTS_SCHEMA"
+                    jq --arg name "$name" --arg desc "$description" '.agents[$name].description = $desc' "$BOBNET_SCHEMA" > "$BOBNET_SCHEMA.tmp"
+                    mv "$BOBNET_SCHEMA.tmp" "$BOBNET_SCHEMA"
                     success "Updated description"
                 fi
             fi
@@ -534,7 +534,7 @@ cmd_agent() {
             local schema_name="$name"
             
             # Check agent exists in schema
-            if ! jq -e --arg a "$schema_name" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+            if ! jq -e --arg a "$schema_name" '.agents[$a]' "$BOBNET_SCHEMA" >/dev/null 2>&1; then
                 error "Agent '$name' not in schema"
             fi
             
@@ -545,7 +545,7 @@ cmd_agent() {
                     else .value |= del(.default)
                     end
                 )
-            ' "$AGENTS_SCHEMA" > "${AGENTS_SCHEMA}.tmp" && mv "${AGENTS_SCHEMA}.tmp" "$AGENTS_SCHEMA"
+            ' "$BOBNET_SCHEMA" > "${BOBNET_SCHEMA}.tmp" && mv "${BOBNET_SCHEMA}.tmp" "$BOBNET_SCHEMA"
             success "schema: $name is now default"
             
             # Apply to live config
@@ -593,7 +593,7 @@ cmd_scope() {
         list|ls)
             echo "=== BobNet Scopes ==="
             for scope in $(get_all_scopes); do
-                local label=$(jq -r --arg s "$scope" '.scopes[$s].label // $s' "$AGENTS_SCHEMA")
+                local label=$(jq -r --arg s "$scope" '.scopes[$s].label // $s' "$BOBNET_SCHEMA")
                 echo ""; echo "[$label] ($scope)"
                 for agent in $(get_agents_by_scope "$scope"); do
                     local id="$agent"
@@ -603,7 +603,7 @@ cmd_scope() {
             done ;;
         -h|--help|help) echo "Usage: bobnet scope [list|<scope-name>]" ;;
         *)
-            if jq -e --arg s "$subcmd" '.scopes[$s]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+            if jq -e --arg s "$subcmd" '.scopes[$s]' "$BOBNET_SCHEMA" >/dev/null 2>&1; then
                 echo "=== Scope: $subcmd ==="; for agent in $(get_agents_by_scope "$subcmd"); do local id="$agent"; echo "  $id"; done
             else error "Unknown scope: $subcmd"; fi ;;
     esac
@@ -615,7 +615,7 @@ cmd_binding() {
     case "$subcmd" in
         list|ls)
             echo "=== Agent Bindings ==="; echo ""; echo "Schema:"
-            jq -r '.bindings[] | "  \(.agentId) → \(.channel) \(if .groupId then "group:" + .groupId[:16] else "dm:" + .dmId[:16] end)..."' "$AGENTS_SCHEMA" 2>/dev/null || echo "  (none)"
+            jq -r '.bindings[] | "  \(.agentId) → \(.channel) \(if .groupId then "group:" + .groupId[:16] else "dm:" + .dmId[:16] end)..."' "$BOBNET_SCHEMA" 2>/dev/null || echo "  (none)"
             echo ""; echo "Config:"
             [[ -n "$claw" ]] && $claw config get bindings 2>/dev/null | jq -r '.[] | "  \(.agentId) → \(.match.channel // "any") \(.match.peer.kind):\(.match.peer.id[:16])..."' 2>/dev/null || echo "  (none)" ;;
         add)
@@ -628,17 +628,17 @@ cmd_binding() {
             local group_id=$(jq -r --arg k "$group_key" '.[$k].deliveryContext.to // empty' "$sessions" | sed 's/^group://')
             local group_label=$(jq -r --arg k "$group_key" '.[$k].label' "$sessions")
             echo "Found: $group_label ($group_id)"
-            jq --argjson b "{\"agentId\":\"$agent_id\",\"channel\":\"signal\",\"groupId\":\"$group_id\"}" '.bindings += [$b]' "$AGENTS_SCHEMA" > "${AGENTS_SCHEMA}.tmp" && mv "${AGENTS_SCHEMA}.tmp" "$AGENTS_SCHEMA"
+            jq --argjson b "{\"agentId\":\"$agent_id\",\"channel\":\"signal\",\"groupId\":\"$group_id\"}" '.bindings += [$b]' "$BOBNET_SCHEMA" > "${BOBNET_SCHEMA}.tmp" && mv "${BOBNET_SCHEMA}.tmp" "$BOBNET_SCHEMA"
             success "added to schema"
-            [[ -n "$claw" ]] && { local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$AGENTS_SCHEMA"); $claw config set bindings "$bindings" --json; success "applied to config"; } ;;
+            [[ -n "$claw" ]] && { local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$BOBNET_SCHEMA"); $claw config set bindings "$bindings" --json; success "applied to config"; } ;;
         remove|rm)
             local agent_id="${1:-}"; [[ -z "$agent_id" ]] && error "Usage: bobnet binding remove <agent>"
-            jq --arg a "$agent_id" '.bindings = [.bindings[] | select(.agentId != $a)]' "$AGENTS_SCHEMA" > "${AGENTS_SCHEMA}.tmp" && mv "${AGENTS_SCHEMA}.tmp" "$AGENTS_SCHEMA"
+            jq --arg a "$agent_id" '.bindings = [.bindings[] | select(.agentId != $a)]' "$BOBNET_SCHEMA" > "${BOBNET_SCHEMA}.tmp" && mv "${BOBNET_SCHEMA}.tmp" "$BOBNET_SCHEMA"
             success "removed from schema"
-            [[ -n "$claw" ]] && { local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$AGENTS_SCHEMA"); $claw config set bindings "$bindings" --json; success "applied to config"; } ;;
+            [[ -n "$claw" ]] && { local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$BOBNET_SCHEMA"); $claw config set bindings "$bindings" --json; success "applied to config"; } ;;
         sync)
             [[ -z "$claw" ]] && error "$CLI_NAME not found"
-            local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$AGENTS_SCHEMA")
+            local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$BOBNET_SCHEMA")
             $claw config set bindings "$bindings" --json; success "synced $(echo "$bindings" | jq length) bindings" ;;
         -h|--help|help) echo "Usage: bobnet binding [list|add|remove|sync]" ;;
         *) error "Unknown: $subcmd" ;;
@@ -964,8 +964,8 @@ EOF
     # 2. Check channels
     echo ""
     echo "--- Channels ---"
-    for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
-        local schema_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
+    for channel in $(jq -r '.channels // {} | keys[]' "$BOBNET_SCHEMA" 2>/dev/null); do
+        local schema_config=$(jq -c ".channels.$channel" "$BOBNET_SCHEMA")
         local live_config=$($claw config get "channels.$channel" 2>/dev/null | jq -c '.' 2>/dev/null || echo '{}')
         
         local drift_keys=""
@@ -990,7 +990,7 @@ EOF
     # 3. Check bindings
     echo ""
     echo "--- Bindings ---"
-    local schema_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+    local schema_count=$(jq '.bindings | length' "$BOBNET_SCHEMA" 2>/dev/null || echo 0)
     local config_count=$($claw config get bindings 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
     
     if [[ "$schema_count" == "$config_count" ]]; then
@@ -1005,12 +1005,12 @@ EOF
     
     # Safety check: refuse to wipe everything
     local schema_agent_count=$(get_all_agents | wc -w | tr -d ' ')
-    local schema_binding_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+    local schema_binding_count=$(jq '.bindings | length' "$BOBNET_SCHEMA" 2>/dev/null || echo 0)
     
     if [[ "$schema_agent_count" -eq 0 ]]; then
         echo -e "${RED}ERROR:${NC} Schema has 0 agents - refusing to sync"
         echo "  This would wipe all agents from config!"
-        echo "  Check: $AGENTS_SCHEMA"
+        echo "  Check: $BOBNET_SCHEMA"
         echo ""
         echo "  Did you pull the latest repo?"
         echo "    cd \$BOBNET_ROOT && git pull"
@@ -1049,7 +1049,7 @@ EOF
     local list='[' first=true
     for agent in $(get_all_agents); do
         local id="$agent"
-        local is_default=$(jq -r --arg a "$agent" '.agents[$a].default // false' "$AGENTS_SCHEMA")
+        local is_default=$(jq -r --arg a "$agent" '.agents[$a].default // false' "$BOBNET_SCHEMA")
         local spawn_perms=$(get_spawn_permissions "$agent")
         local model=$(get_agent_model "$agent")
         local ws=$(get_workspace "$agent")
@@ -1068,8 +1068,8 @@ EOF
     $claw config set agents.list "$list" --json && success "agents + spawn permissions applied"
     
     # Apply channels (merge or replace based on --force)
-    for channel in $(jq -r '.channels // {} | keys[]' "$AGENTS_SCHEMA" 2>/dev/null); do
-        local schema_config=$(jq -c ".channels.$channel" "$AGENTS_SCHEMA")
+    for channel in $(jq -r '.channels // {} | keys[]' "$BOBNET_SCHEMA" 2>/dev/null); do
+        local schema_config=$(jq -c ".channels.$channel" "$BOBNET_SCHEMA")
         if [[ "$force" == "true" ]]; then
             $claw config set "channels.$channel" "$schema_config" --json && success "$channel replaced"
         else
@@ -1082,7 +1082,7 @@ EOF
     done
     
     # Apply bindings
-    local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$AGENTS_SCHEMA" 2>/dev/null || echo '[]')
+    local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$BOBNET_SCHEMA" 2>/dev/null || echo '[]')
     $claw config set bindings "$bindings" --json && success "bindings applied"
     
     echo ""
@@ -2249,7 +2249,7 @@ cmd_groups() {
                 fi
                 
                 # Check if agent has knownGroups
-                local groups_obj=$(jq -c --arg a "$agent" '.agents[$a].knownGroups // {}' "$AGENTS_SCHEMA" 2>/dev/null)
+                local groups_obj=$(jq -c --arg a "$agent" '.agents[$a].knownGroups // {}' "$BOBNET_SCHEMA" 2>/dev/null)
                 local group_count=$(echo "$groups_obj" | jq 'length' 2>/dev/null || echo 0)
                 
                 if [[ "$group_count" -gt 0 ]]; then
@@ -2300,7 +2300,7 @@ cmd_groups() {
                 fi
                 
                 # Look for group in this agent's knownGroups
-                local group_id=$(jq -r --arg a "$agent" --arg g "$group_name" '.agents[$a].knownGroups[$g] // empty' "$AGENTS_SCHEMA" 2>/dev/null)
+                local group_id=$(jq -r --arg a "$agent" --arg g "$group_name" '.agents[$a].knownGroups[$g] // empty' "$BOBNET_SCHEMA" 2>/dev/null)
                 
                 if [[ -n "$group_id" ]]; then
                     echo "$group_id"
@@ -2344,18 +2344,18 @@ cmd_groups() {
             [[ -z "$group_id" ]] && error "Usage: bobnet groups add <name> <group-id> [--agent <agent>]"
             
             # Validate agent exists
-            if ! jq -e --arg a "$target_agent" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+            if ! jq -e --arg a "$target_agent" '.agents[$a]' "$BOBNET_SCHEMA" >/dev/null 2>&1; then
                 error "Agent '$target_agent' not found in schema"
             fi
             
             # Add group to agent's knownGroups
-            local temp_file="${AGENTS_SCHEMA}.tmp"
+            local temp_file="${BOBNET_SCHEMA}.tmp"
             jq --arg a "$target_agent" --arg g "$group_name" --arg id "$group_id" '
                 .agents[$a].knownGroups = ((.agents[$a].knownGroups // {}) | .[$g] = $id)
-            ' "$AGENTS_SCHEMA" > "$temp_file"
+            ' "$BOBNET_SCHEMA" > "$temp_file"
             
             if [[ $? -eq 0 ]]; then
-                mv "$temp_file" "$AGENTS_SCHEMA"
+                mv "$temp_file" "$BOBNET_SCHEMA"
                 success "Added '$group_name' to $target_agent's known groups"
             else
                 rm -f "$temp_file"
@@ -2388,7 +2388,7 @@ cmd_groups() {
             
             if [[ -n "$target_agent" ]]; then
                 # Check if agent exists
-                if ! jq -e --arg a "$target_agent" '.agents[$a]' "$AGENTS_SCHEMA" >/dev/null 2>&1; then
+                if ! jq -e --arg a "$target_agent" '.agents[$a]' "$BOBNET_SCHEMA" >/dev/null 2>&1; then
                     error "Agent '$target_agent' not found in schema"
                 fi
                 agents_to_check="$target_agent"
@@ -2398,17 +2398,17 @@ cmd_groups() {
             
             for agent in $agents_to_check; do
                 # Check if group exists for this agent
-                local group_id=$(jq -r --arg a "$agent" --arg g "$group_name" '.agents[$a].knownGroups[$g] // empty' "$AGENTS_SCHEMA" 2>/dev/null)
+                local group_id=$(jq -r --arg a "$agent" --arg g "$group_name" '.agents[$a].knownGroups[$g] // empty' "$BOBNET_SCHEMA" 2>/dev/null)
                 
                 if [[ -n "$group_id" ]]; then
                     # Remove the group
-                    local temp_file="${AGENTS_SCHEMA}.tmp"
+                    local temp_file="${BOBNET_SCHEMA}.tmp"
                     jq --arg a "$agent" --arg g "$group_name" '
                         .agents[$a].knownGroups = ((.agents[$a].knownGroups // {}) | del(.[$g]))
-                    ' "$AGENTS_SCHEMA" > "$temp_file"
+                    ' "$BOBNET_SCHEMA" > "$temp_file"
                     
                     if [[ $? -eq 0 ]]; then
-                        mv "$temp_file" "$AGENTS_SCHEMA"
+                        mv "$temp_file" "$BOBNET_SCHEMA"
                         success "Removed '$group_name' from $agent's known groups"
                         removed=true
                     else
@@ -2461,60 +2461,39 @@ EOF
 }
 
 cmd_restart() {
-    # Silent cooldown - prevent restart loops
-    local lockfile="/tmp/bobnet-restart.lock"
-    local cooldown=120
-    if [[ -f "$lockfile" ]]; then
-        local last=$(cat "$lockfile" 2>/dev/null || echo 0)
-        local now=$(date +%s)
-        if (( now - last < cooldown )); then
-            local remaining=$((cooldown - now + last))
-            echo "Cooldown: waiting ${remaining}s before restart..."
-            sleep "$remaining"
-        fi
-    fi
-    echo "$(date +%s)" > "$lockfile"
+    # Parse arguments
+    local delay=10
+    local yes=false
     
-    local mode="graceful" delay=10 timeout=30 yes=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --broadcast) mode="broadcast"; shift ;;
-            --graceful) mode="graceful"; shift ;;  # kept for backwards compat
-            --no-broadcast) mode="immediate"; shift ;;
-            --delay) delay="$2"; shift 2 ;;
-            --timeout) timeout="$2"; shift 2 ;;
-            --yes|-y) yes=true; shift ;;
-            -h|--help)
-                cat <<'EOF'
-Usage: bobnet restart [--graceful|--no-broadcast] [--delay <sec>] [--timeout <sec>] [--yes]
+            --help|-h)
+                cat << 'EOF'
+USAGE: bobnet restart [OPTIONS]
 
-Restart OpenClaw gateway.
-
-MODES:
-  (default)        Graceful: prep agents, wait, restart, send recovery message
-  --broadcast      Simple: broadcast warning, wait, restart (no BOOTSTRAP.md)
-  --no-broadcast   Immediate restart (maintenance)
+Restart the OpenClaw gateway with agent coordination.
 
 OPTIONS:
-  --delay <sec>    Seconds to wait after broadcast (default: 10)
-  --timeout <sec>  Graceful mode: max wait for agents (default: 30)
+  --delay <sec>    Seconds to wait for agents to finish (default: 10)
   --yes, -y        Skip confirmation prompt
 
-GRACEFUL FLOW:
-  1. Write prep BOOTSTRAP.md to each agent
-  2. Set agents to Haiku model, trigger turns
-  3. Agents notify users, write READY.md
-  4. Wait for READY.md files (or timeout)
-  5. Restart gateway
-  6. Write recovery BOOTSTRAP.md to each agent
-  7. Agents recover on next turn
+PROCESS:
+  1. Broadcast warning to active channels
+  2. Wait for drain period (agents finish work)
+  3. Restart gateway
+  4. Send recovery messages (agents wake automatically)
 
 EXAMPLES:
-  bobnet restart                    # Broadcast, 10s delay, restart
-  bobnet restart --graceful         # Full agent coordination
-  bobnet restart --no-broadcast     # Immediate restart
+  bobnet restart                    # Default (10s drain)
+  bobnet restart --delay 30         # Longer drain period
+  bobnet restart -y                 # No confirmation
 EOF
                 return 0 ;;
+            --delay) shift; delay="$1"; shift ;;
+            --yes|-y) yes=true; shift ;;
+            --graceful|--no-broadcast) 
+                warn "Option $1 is deprecated (all restarts use message-based wake)"
+                shift ;;
             *) error "Unknown option: $1" ;;
         esac
     done
@@ -2532,306 +2511,172 @@ EOF
     
     # Confirmation
     if [[ "$yes" != "true" ]]; then
-        case "$mode" in
-            graceful) echo "This will coordinate with agents and restart gracefully." ;;
-            broadcast) echo "This will broadcast a restart warning and restart in ${delay}s." ;;
-            immediate) echo "This will restart the gateway immediately (no broadcast)." ;;
-        esac
+        echo "This will broadcast a restart warning and restart in ${delay}s."
         read -p "Continue? [y/N] " -r
         [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled"; return 0; }
     fi
     
-    # Templates
-    local prep_template="$BOBNET_ROOT/core/templates/restart-prep-bootstrap.md"
-    local recovery_template="$BOBNET_ROOT/core/templates/restart-recovery-bootstrap.md"
+    echo "=== Restart Flow ==="
+    echo ""
     
-    case "$mode" in
-        graceful)
-            # Verify templates exist
-            [[ ! -f "$prep_template" ]] && error "Missing template: $prep_template"
-            [[ ! -f "$recovery_template" ]] && error "Missing template: $recovery_template"
-            
-            echo "=== Graceful Restart ==="
-            echo ""
-            
-            # Get active sessions (active in last hour)
-            echo "--- Phase 1: Prep agents ---"
-            # Extract agent ID from session key (format: agent:<agentId>:...)
-            local sessions=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
-                .sessions[] | 
-                select(.deliveryContext != null) |
-                select(.updatedAt > (now - 3600) * 1000) |
-                select(.key | startswith("agent:")) |
-                (.key | split(":")[1]) + "|" + .key
-            ' 2>/dev/null | sort -u)
-            
-            local agents_prepped=()
-            
-            # Get sessions with delivery context for messaging
-            local session_details=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
-                .sessions[] | 
-                select(.deliveryContext != null) |
-                select(.updatedAt > (now - 3600) * 1000) |
-                select(.key | startswith("agent:")) |
-                [(.key | split(":")[1]), .key, .deliveryContext.channel, (.deliveryContext.to | gsub("^signal:"; "uuid:")), (.deliveryContext.accountId // "default")] | @tsv
-            ' 2>/dev/null | sort -u)
-            
-            local msg="⚠️ Gateway restart initiated. Please wait..."
-            
-            while IFS=$'\t' read -r agentId sessionKey channel target accountId; do
-                [[ -z "$agentId" || -z "$sessionKey" ]] && continue
-                
-                local ws="$BOBNET_ROOT/workspace/$agentId"
-                [[ ! -d "$ws" ]] && continue
-                
-                # Write prep BOOTSTRAP.md
-                cp "$prep_template" "$ws/BOOTSTRAP.md"
-                
-                # Send warning to channel
-                if [[ -n "$channel" && -n "$target" ]]; then
-                    $claw message send --channel "$channel" --target "$target" --account "$accountId" --message "$msg" &>/dev/null || true
-                fi
-                
-                agents_prepped+=("$agentId")
-                echo "  ✓ $agentId"
-            done <<< "$session_details"
-            
-            local expected=${#agents_prepped[@]}
-            if [[ $expected -eq 0 ]]; then
-                echo "  No active agents to prep"
-            else
-                success "Prepped $expected agent(s)"
-            fi
-            
-            # Wait for READY.md files
-            echo ""
-            echo "--- Phase 2: Wait for ready (${timeout}s timeout) ---"
-            local deadline=$(($(date +%s) + timeout))
-            local ready_count=0
-            
-            if [[ $expected -eq 0 ]]; then
-                echo "  No agents to wait for"
-            else
-                while [[ $(date +%s) -lt $deadline ]]; do
-                    ready_count=0
-                    for agent in "${agents_prepped[@]}"; do
-                        [[ -f "$BOBNET_ROOT/workspace/$agent/READY.md" ]] && ((ready_count++))
-                    done
-                    
-                    echo -ne "\r  $ready_count/$expected ready...  "
-                    
-                    if [[ $ready_count -ge $expected ]]; then
-                        break
-                    fi
-                    sleep 2
-                done
-                echo ""
-                
-                if [[ $ready_count -ge $expected ]]; then
-                    success "All agents ready"
-                else
-                    warn "Timeout: $ready_count/$expected ready (proceeding anyway)"
-                fi
-            fi
-            
-            # Phase 3: Schedule recovery triggers BEFORE restart
-            echo ""
-            echo "--- Phase 3: Schedule recovery triggers ---"
-            
-            # Save session details to temp file for background process
-            local trigger_file="/tmp/bobnet-recovery-triggers-$$.txt"
-            echo "$session_details" > "$trigger_file"
-            
-            # Background process: wait for gateway, then trigger each agent
-            # Use 'at' to schedule outside the process tree (survives gateway restart)
-            local script_file="/tmp/bobnet-recovery-$$.sh"
-            local log_file="/tmp/bobnet-recovery-$$.log"
-            
-            cat > "$script_file" << RECOVERY_SCRIPT
+    # Phase 1: Broadcast + Drain
+    echo "--- Phase 1: Broadcast warning (${delay}s drain) ---"
+    
+    # Get active sessions with delivery context
+    local session_details=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
+        .sessions[] | 
+        select(.deliveryContext != null) |
+        select(.updatedAt > (now - 3600) * 1000) |
+        select(.key | startswith("agent:")) |
+        [(.key | split(":")[1]), .key, .deliveryContext.channel, (.deliveryContext.to | gsub("^signal:"; "uuid:")), (.deliveryContext.accountId // "default")] | @tsv
+    ' 2>/dev/null | sort -u)
+    
+    local msg="⚠️ Restarting in ${delay}s... (finishing current work)"
+    local broadcast_count=0
+    local seen_channels=""
+    
+    while IFS=$'\t' read -r agentId sessionKey channel target accountId; do
+        [[ -z "$channel" || -z "$target" ]] && continue
+        
+        local channel_key="${channel}:${target}"
+        
+        # Deduplicate: only send one message per channel (bash 3.2 compatible)
+        if ! echo "$seen_channels" | grep -q "$channel_key"; then
+            seen_channels="$seen_channels $channel_key "
+            $claw message send --channel "$channel" --target "$target" --account "$accountId" --message "$msg" &>/dev/null && {
+                echo "  ✓ $channel -> ${target:0:20}..."
+                ((broadcast_count++))
+            }
+        fi
+    done <<< "$session_details"
+    
+    if [[ $broadcast_count -eq 0 ]]; then
+        echo "  No active channels to notify"
+    else
+        success "Broadcasted to $broadcast_count channel(s)"
+    fi
+    
+    # Wait for drain period
+    echo ""
+    echo "Waiting ${delay}s for agents to finish work..."
+    for ((i=delay; i>0; i--)); do
+        echo -ne "\r  ${i}s remaining...  "
+        sleep 1
+    done
+    echo ""
+    
+    # Phase 2: Schedule recovery + Restart
+    echo ""
+    echo "--- Phase 2: Schedule recovery ---"
+    
+    # Save session details for recovery script
+    local trigger_file="/tmp/bobnet-recovery-$$.txt"
+    echo "$session_details" > "$trigger_file"
+    
+    # Create recovery script
+    local script_file="/tmp/bobnet-recovery-$$.sh"
+    local log_file="/tmp/bobnet-recovery-$$.log"
+    
+    cat > "$script_file" << 'RECOVERY_SCRIPT'
 #!/bin/bash
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-exec > "$log_file" 2>&1
-echo "Recovery trigger started at \$(date)"
+exec > RECOVERY_LOG_PLACEHOLDER 2>&1
+echo "Recovery started at $(date)"
 
-# Wait for gateway to be ready (max 60s)
-for i in {1..30}; do
-    sleep 2
+# Wait for gateway (max 5 retries, exponential backoff)
+max_attempts=5
+attempt=1
+while [[ $attempt -le $max_attempts ]]; do
     if curl -sf http://127.0.0.1:18789/health &>/dev/null; then
-        echo "Gateway ready after \$((i*2))s"
+        echo "Gateway ready after attempt $attempt"
         break
     fi
-    echo "Waiting... attempt \$i"
+    
+    wait_time=$((attempt * 10))
+    echo "Gateway not ready, retry $attempt/$max_attempts in ${wait_time}s"
+    sleep $wait_time
+    ((attempt++))
 done
 
-# Send recovery trigger to each session
-msg="🔄 Gateway back online — send any message to resume."
-while IFS=\$'\\t' read -r agentId sessionKey channel target accountId; do
-    [[ -z "\$channel" || -z "\$target" ]] && continue
-    echo "Sending to \$channel/\$target..."
-    
-    # Send visible message via signal-cli HTTP API (cheaper than openclaw)
-    if [[ "\$channel" == "signal" ]]; then
-        # Extract username from target if available, fall back to openclaw
-        curl -sf -X POST http://127.0.0.1:8080/api/v1/rpc \\
-          -H "Content-Type: application/json" \\
-          -d "{\"jsonrpc\":\"2.0\",\"method\":\"send\",\"params\":{\"recipient\":[\"\${target#uuid:}\"],\"message\":\"\$msg\"},\"id\":1}" 2>&1 || \\
-        /opt/homebrew/bin/openclaw message send --channel "\$channel" --target "\$target" --account "\$accountId" --message "\$msg" 2>&1
-    else
-        /opt/homebrew/bin/openclaw message send --channel "\$channel" --target "\$target" --account "\$accountId" --message "\$msg" 2>&1
-    fi
-    
-    # Note: No external RPC to wake sessions - user message triggers recovery
-done < "$trigger_file"
+if [[ $attempt -gt $max_attempts ]]; then
+    echo "ERROR: Gateway failed to restart after $max_attempts attempts"
+    exit 1
+fi
 
-echo "Recovery triggers complete at \$(date)"
-rm -f "$trigger_file" "$script_file"
+# Send recovery messages
+msg="🔄 Gateway back online
+• Resuming normal operation
+• Send any message to continue"
+seen_channels=""
+
+while IFS=$'\t' read -r agentId sessionKey channel target accountId; do
+    [[ -z "$channel" || -z "$target" ]] && continue
+    
+    channel_key="${channel}:${target}"
+    
+    # Deduplicate: one message per channel (bash 3.2 compatible)
+    if ! echo "$seen_channels" | grep -q "$channel_key"; then
+        seen_channels="$seen_channels $channel_key "
+        echo "Sending to $channel/${target:0:20}..."
+        
+        /opt/homebrew/bin/openclaw message send \
+            --channel "$channel" \
+            --target "$target" \
+            --account "$accountId" \
+            --message "$msg" 2>&1 || \
+        /opt/homebrew/bin/openclaw sessions send \
+            --label "$agentId" \
+            --message "🔄 Gateway restarted" 2>&1
+    fi
+done < RECOVERY_TRIGGER_PLACEHOLDER
+
+echo "Recovery complete at $(date)"
+rm -f RECOVERY_TRIGGER_PLACEHOLDER RECOVERY_SCRIPT_PLACEHOLDER
 RECOVERY_SCRIPT
-            chmod +x "$script_file"
-            
-            # Schedule with launchctl to run outside process tree (survives gateway restart)
-            local job_label="com.bobnet.recovery.$$"
-            launchctl submit -l "$job_label" -- "$script_file" 2>/dev/null || {
-                # Fallback if launchctl fails - try nohup
-                nohup "$script_file" </dev/null >/dev/null 2>&1 &
-            }
-            
-            success "Recovery triggers scheduled"
-            
-            # Phase 4: Write recovery BOOTSTRAP
-            echo "--- Phase 4: Write recovery bootstrap ---"
-            for agent in $(get_all_agents); do
-                local ws="$BOBNET_ROOT/workspace/$agent"
-                [[ ! -d "$ws" ]] && continue
-                cp "$recovery_template" "$ws/BOOTSTRAP.md"
-            done
-            success "Recovery bootstrap written to all agents"
-            
-            # Phase 5: Restart gateway (will kill this script, but triggers are scheduled)
-            echo "--- Phase 5: Restart gateway ---"
-            echo ""
-            success "=== Graceful restart initiated ==="
-            echo "Recovery triggers scheduled. Restarting gateway..."
-            $claw gateway restart
-            ;;
-            
-        broadcast)
-            echo "Broadcasting restart warning..."
-            
-            # Get active sessions with delivery context
-            # Note: deliveryContext.to may have "signal:" prefix that needs converting to "uuid:" for CLI
-            local sessions=$($claw gateway call sessions.list --json 2>/dev/null | jq -r '
-                .sessions[] | 
-                select(.deliveryContext != null) |
-                select(.updatedAt > (now - 3600) * 1000) |
-                "\(.deliveryContext.channel)|\(.deliveryContext.to | gsub("^signal:"; "uuid:"))|\(.deliveryContext.accountId // "default")"
-            ' 2>/dev/null | sort -u)
-            
-            local msg="⚠️ BobNet restarting in ${delay} seconds..."
-            local count=0
-            
-            while IFS='|' read -r channel to accountId; do
-                [[ -z "$channel" || -z "$to" ]] && continue
-                if $claw message send --channel "$channel" --target "$to" --account "$accountId" --message "$msg" &>/dev/null; then
-                    ((count++))
-                fi
-            done <<< "$sessions"
-            
-            if [[ $count -gt 0 ]]; then
-                success "Broadcast sent to $count session(s)"
-            else
-                echo "  No active sessions to notify"
-            fi
-            
-            # Countdown
-            echo "Restarting in ${delay}s..."
-            for ((i=delay; i>0; i--)); do
-                echo -ne "\r  ${i}s remaining...  "
-                sleep 1
-            done
-            echo ""
-            
-            # Restart
-            echo "Restarting gateway..."
-            $claw gateway restart && success "Gateway restarted" || error "Restart failed"
-            ;;
-            
-        immediate)
-            echo "Restarting gateway..."
-            $claw gateway restart && success "Gateway restarted" || error "Restart failed"
-            ;;
-    esac
-}
-
-
-# Basic config validation for upgrade pre-flight
-# TODO: Replace with `openclaw config validate --target-version` when available upstream
-# See: https://github.com/openclaw/openclaw/issues/XXXX
-validate_config_for_upgrade() {
-    local config="$1"
-    local target_version="$2"
-    local warnings=0
     
-    [[ ! -f "$config" ]] && { error "Config file not found: $config"; return 1; }
+    # Replace placeholders
+    sed -i '' "s|RECOVERY_LOG_PLACEHOLDER|$log_file|g" "$script_file"
+    sed -i '' "s|RECOVERY_TRIGGER_PLACEHOLDER|$trigger_file|g" "$script_file"
+    sed -i '' "s|RECOVERY_SCRIPT_PLACEHOLDER|$script_file|g" "$script_file"
+    chmod +x "$script_file"
     
-    echo "  Validating config for upgrade to $target_version..."
-    
-    # Check 1: Valid JSON
-    if ! jq empty "$config" 2>/dev/null; then
-        error "Config is not valid JSON"
-        return 1
-    fi
-    
-    # Check 2: Known incompatible properties (version-specific)
-    # Example: BlueBubbles allowPrivateUrl was added but not supported in 2026.2.3-1
-    local bluebubbles_url=$(jq -r '.channels.bluebubbles.allowPrivateUrl // empty' "$config" 2>/dev/null)
-    if [[ -n "$bluebubbles_url" && "$target_version" == "2026.2.3-1" ]]; then
-        warn "channels.bluebubbles.allowPrivateUrl not supported in $target_version"
-        warn "  This property will be ignored (safe to continue)"
-        ((warnings++))
-    fi
-    
-    # Check 3: Required fields present
-    local agents_list=$(jq -r '.agents.list // empty' "$config" 2>/dev/null)
-    if [[ -z "$agents_list" || "$agents_list" == "null" ]]; then
-        warn "agents.list is empty or missing (gateway may not start)"
-        ((warnings++))
-    fi
-    
-    # Check 4: Config file size (very large configs may indicate corruption)
-    local config_size=$(wc -c < "$config")
-    if [[ $config_size -gt 1048576 ]]; then  # 1MB
-        warn "Config file is unusually large (${config_size} bytes)"
-        warn "  This may indicate corruption or excessive data"
-        ((warnings++))
-    fi
-    
-    # Summary
-    if [[ $warnings -eq 0 ]]; then
-        success "Config validation passed (basic checks)"
+    # Schedule with launchctl (survives restart)
+    local job_label="com.bobnet.recovery.$$"
+    if launchctl submit -l "$job_label" -- "$script_file" 2>/dev/null; then
+        success "Recovery scheduled (launchctl)"
     else
-        warn "Config validation completed with $warnings warning(s)"
-        warn "  Proceeding with upgrade (use --force to skip this check)"
+        # Fallback: nohup
+        nohup "$script_file" </dev/null >/dev/null 2>&1 &
+        success "Recovery scheduled (nohup)"
     fi
     
-    return 0  # Non-blocking for now
+    # Restart gateway
+    echo ""
+    echo "--- Phase 3: Restart gateway ---"
+    echo "Restarting gateway..."
+    
+    if $claw gateway restart; then
+        success "Gateway restarted"
+        echo ""
+        echo "Recovery messages will be sent automatically."
+        echo "Check log: $log_file"
+    else
+        error "Restart failed"
+    fi
 }
+
+
 cmd_upgrade() {
-    local target="openclaw" version="latest" dry_run=false yes=false force=false
-    local do_rollback=false do_pin=false
+    local target="openclaw" version="latest" dry_run=false yes=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --openclaw) target="openclaw"; shift ;;
             --version) version="$2"; shift 2 ;;
             --dry-run) dry_run=true; shift ;;
             --yes|-y) yes=true; shift ;;
-            --force|-f) force=true; shift ;;
-            --rollback) do_rollback=true; shift ;;
-            --pin) do_pin=true; shift ;;
             -h|--help)
                 cat <<'EOF'
 Usage: bobnet upgrade --openclaw [--version <ver>] [--dry-run] [--yes]
-       bobnet upgrade --openclaw --rollback
-       bobnet upgrade --openclaw --pin
 
 Upgrade OpenClaw with automatic rollback on failure.
 
@@ -2840,27 +2685,19 @@ OPTIONS:
   --version <ver>    Target version (default: latest)
   --dry-run          Show what would happen without doing it
   --yes, -y          Skip confirmation prompt
-  --force, -f        Skip BobNet CLI version check (not recommended)
-  --rollback         Rollback to pinned stable version
-  --pin              Mark current version as stable/pinned
 
 PROCESS:
-  1. Pre-flight checks (disk space, npm registry)
-  2. Backup config
-  3. Apply config migrations (if needed)
-  4. Validate config for target version (basic checks)
-  5. Stop gateway
-  6. npm install -g openclaw@VERSION
-  7. Start gateway
-  8. Run health checks (version, connectivity)
-  9. Rollback if checks fail (reinstall old version)
-  10. Update version tracking in BobNet
+  1. Backup config
+  2. Apply config migrations (e.g., BlueBubbles allowPrivateUrl)
+  3. Stop gateway
+  4. npm install -g openclaw@VERSION
+  5. Start gateway
+  6. Run health checks (version, connectivity)
+  7. Rollback if checks fail (reinstall old version)
 
 EXAMPLE:
   bobnet upgrade --openclaw
   bobnet upgrade --openclaw --version 2026.2.2
-  bobnet upgrade --openclaw --rollback
-  bobnet upgrade --openclaw --pin
 EOF
                 return 0 ;;
             *) error "Unknown option: $1" ;;
@@ -2869,53 +2706,8 @@ EOF
     
     [[ "$target" != "openclaw" ]] && error "Currently only --openclaw is supported"
     
-    local VERSIONS_FILE="$BOBNET_ROOT/config/openclaw-versions.json"
+    local VERSION_HISTORY="$CONFIG_DIR/version-history.log"
     local LOCK_FILE="/tmp/bobnet-upgrade.lock"
-    
-    # Ensure versions file exists
-    if [[ ! -f "$VERSIONS_FILE" ]]; then
-        local current_ver=$(openclaw --version 2>/dev/null | head -1)
-        cat > "$VERSIONS_FILE" <<EOF
-{
-  "pinned": "$current_ver",
-  "current": "$current_ver",
-  "history": [
-    {
-      "version": "$current_ver",
-      "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-      "status": "stable",
-      "note": "Initial tracked version"
-    }
-  ]
-}
-EOF
-        echo "Created version tracking file: $VERSIONS_FILE"
-    fi
-    
-    # Handle --pin flag
-    if [[ "$do_pin" == "true" ]]; then
-        local current_ver=$(openclaw --version 2>/dev/null | head -1)
-        local tmp_file=$(mktemp)
-        jq --arg ver "$current_ver" '
-          .pinned = $ver |
-          .history = [.history[] | if .version == $ver then .status = "stable" else . end]
-        ' "$VERSIONS_FILE" > "$tmp_file" && mv "$tmp_file" "$VERSIONS_FILE"
-        success "Pinned version $current_ver as stable"
-        return 0
-    fi
-    
-    # Handle --rollback flag
-    if [[ "$do_rollback" == "true" ]]; then
-        local pinned_ver=$(jq -r '.pinned // empty' "$VERSIONS_FILE")
-        [[ -z "$pinned_ver" ]] && error "No pinned version found in $VERSIONS_FILE"
-        local current_ver=$(openclaw --version 2>/dev/null | head -1)
-        if [[ "$current_ver" == "$pinned_ver" ]]; then
-            success "Already at pinned version $pinned_ver"
-            return 0
-        fi
-        echo "Rolling back: $current_ver → $pinned_ver"
-        version="$pinned_ver"
-    fi
     
     # Acquire lock (macOS compatible)
     if [[ -f "$LOCK_FILE" ]]; then
@@ -2927,67 +2719,6 @@ EOF
     fi
     echo $$ > "$LOCK_FILE"
     trap "rm -f '$LOCK_FILE'" EXIT
-    
-    # Check BobNet CLI version (unless --force)
-    if [[ "$force" != "true" && "$do_rollback" != "true" ]]; then
-        local cli_version=$(cat "$HOME/.local/lib/bobnet/version" 2>/dev/null || echo "unknown")
-        local remote_version=""
-        
-        # Try to fetch latest version from GitHub
-        if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
-            # Use gh CLI if available and authenticated
-            remote_version=$(gh api repos/buildzero-tech/bobnet-cli/contents/install.sh --jq '.content' 2>/dev/null | base64 -d | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
-        elif command -v curl &>/dev/null; then
-            # Fallback to curl
-            remote_version=$(curl -fsSL "https://raw.githubusercontent.com/buildzero-tech/bobnet-cli/main/install.sh" 2>/dev/null | grep '^BOBNET_CLI_VERSION="' | cut -d'"' -f2)
-        fi
-        
-        if [[ -n "$remote_version" && "$cli_version" != "$remote_version" && "$cli_version" != "unknown" ]]; then
-            echo ""
-            echo -e "${YELLOW}⚠ BobNet CLI is outdated${NC}"
-            echo "  Current:  v$cli_version"
-            echo "  Latest:   v$remote_version"
-            echo ""
-            echo "  The latest version includes important fixes:"
-            echo "  - Cross-platform gateway support (Linux/macOS)"
-            echo "  - Health check improvements"
-            echo "  - Version tracking fixes"
-            echo ""
-            echo -e "${YELLOW}Recommendation: Update BobNet CLI first${NC}"
-            echo "  bobnet update"
-            echo ""
-            
-            # Calculate version difference
-            local current_major=$(echo "$cli_version" | cut -d. -f1)
-            local current_minor=$(echo "$cli_version" | cut -d. -f2)
-            local remote_major=$(echo "$remote_version" | cut -d. -f1)
-            local remote_minor=$(echo "$remote_version" | cut -d. -f2)
-            
-            # Require update if 2+ minor versions behind
-            local version_diff=$((remote_minor - current_minor))
-            if [[ "$version_diff" -ge 2 || "$remote_major" -gt "$current_major" ]]; then
-                echo -e "${RED}Error: BobNet CLI is too old ($version_diff versions behind)${NC}"
-                echo "Please update before upgrading OpenClaw:"
-                echo "  bobnet update"
-                echo ""
-                echo "Or use --force to skip this check (not recommended)"
-                return 1
-            fi
-            
-            # Just warn if 1 version behind
-            if [[ "$yes" != "true" ]]; then
-                read -p "Continue anyway? [y/N] " -r
-                [[ ! $REPLY =~ ^[Yy]$ ]] && { echo "Cancelled. Run 'bobnet update' first."; return 0; }
-            else
-                echo "Continuing with outdated CLI (--yes flag)"
-            fi
-            echo ""
-        elif [[ -z "$remote_version" ]]; then
-            warn "Could not check BobNet CLI version (GitHub unreachable)"
-            echo "  Proceeding anyway..."
-            echo ""
-        fi
-    fi
     
     echo "=== BobNet OpenClaw Upgrade ==="
     echo ""
@@ -3027,9 +2758,9 @@ EOF
         echo "Would perform:"
         echo "  1. Backup config to ~/.openclaw/openclaw.json.pre-upgrade"
         echo "  2. Apply config migrations (BlueBubbles allowPrivateUrl, etc.)"
-        echo "  3. Stop gateway (openclaw gateway stop)"
+        echo "  3. Stop gateway (launchctl bootout)"
         echo "  4. npm install -g openclaw@$target_version"
-        echo "  5. Start gateway (openclaw gateway start)"
+        echo "  5. Start gateway (launchctl bootstrap)"
         echo "  6. Poll health endpoint (up to 30s)"
         echo "  7. Run health checks"
         echo "  8. Rollback if checks fail (reinstall old version)"
@@ -3049,30 +2780,6 @@ EOF
     fi
     
     echo ""
-    
-    # Pre-flight checks
-    echo "--- Pre-flight checks ---"
-    
-    # Check disk space (need at least 500MB for npm install)
-    local free_space_mb=$(df -m "$HOME" | tail -1 | awk '{print $4}')
-    if [[ "$free_space_mb" -lt 500 ]]; then
-        error "Insufficient disk space: ${free_space_mb}MB free (need 500MB)"
-    fi
-    success "Disk space: ${free_space_mb}MB free"
-    
-    # Check npm registry reachable
-    if ! npm ping &>/dev/null; then
-        error "npm registry not reachable"
-    fi
-    success "npm registry reachable"
-    
-    # Check for active agent sessions (warn only)
-    local active_sessions=$(openclaw sessions list --format json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
-    if [[ "$active_sessions" -gt 0 ]]; then
-        warn "Active sessions detected: $active_sessions (will be interrupted)"
-    fi
-    
-    echo ""
     local rollback_needed=false
     local config="$CONFIG_DIR/$CONFIG_NAME"
     local backup="$CONFIG_DIR/${CONFIG_NAME}.pre-upgrade"
@@ -3085,19 +2792,23 @@ EOF
     # Step 2: Apply config migrations before switching
     echo ""
     echo "--- Step 2: Apply config migrations ---"
-    echo "  No migrations needed (deferred to post-upgrade doctor)"
-    
-    # Step 2.5: Validate config for target version
-    echo ""
-    echo "--- Step 2.5: Config validation ---"
-    if ! validate_config_for_upgrade "$config" "$target_version"; then
-        error "Config validation failed (use --force to skip)"
+    local bb_url=$(jq -r '.channels.bluebubbles.serverUrl // ""' "$config" 2>/dev/null)
+    if [[ "$bb_url" =~ ^http://(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|localhost) ]]; then
+        echo "  BlueBubbles uses private IP: $bb_url"
+        if ! jq -e '.channels.bluebubbles.allowPrivateUrl' "$config" >/dev/null 2>&1; then
+            jq '.channels.bluebubbles.allowPrivateUrl = true' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+            success "Added BlueBubbles allowPrivateUrl=true"
+        else
+            echo "  allowPrivateUrl already set"
+        fi
+    else
+        echo "  No migrations needed"
     fi
     
     # Step 3: Stop gateway before npm install
     echo ""
     echo "--- Step 3: Stop gateway ---"
-    openclaw gateway stop >/dev/null 2>&1 || true
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null || true
     sleep 2
     success "Gateway stopped"
     
@@ -3115,7 +2826,7 @@ EOF
     echo ""
     echo "--- Step 5: Start gateway ---"
     if [[ "$rollback_needed" == "false" ]]; then
-        openclaw gateway start >/dev/null 2>&1 || warn "Gateway start failed (may already be running)"
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
     fi
     
     # Poll for gateway health (up to 30s)
@@ -3155,7 +2866,6 @@ EOF
         fi
         
         # Check 2: BlueBubbles connectivity (if configured)
-        local bb_url=$(jq -r '.channels.bluebubbles.url // ""' "$config" 2>/dev/null)
         if [[ "$rollback_needed" == "false" && -n "$bb_url" ]]; then
             local bb_password=$(jq -r '.channels.bluebubbles.password // ""' "$config" 2>/dev/null)
             if curl -s --max-time 5 "${bb_url}/api/v1/server/info?password=${bb_password}" | jq -e '.status == 200' >/dev/null 2>&1; then
@@ -3177,9 +2887,9 @@ EOF
         # Check 4: Schema vs Config delta
         echo ""
         echo "--- Config Delta Analysis ---"
-        local schema_agent_count=$(jq '.agents | keys | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+        local schema_agent_count=$(jq '.agents | keys | length' "$BOBNET_SCHEMA" 2>/dev/null || echo 0)
         local config_agent_count=$(openclaw config get agents.list 2>/dev/null | jq 'length' || echo 0)
-        local schema_binding_count=$(jq '.bindings | length' "$AGENTS_SCHEMA" 2>/dev/null || echo 0)
+        local schema_binding_count=$(jq '.bindings | length' "$BOBNET_SCHEMA" 2>/dev/null || echo 0)
         local config_binding_count=$(openclaw config get bindings 2>/dev/null | jq 'length' || echo 0)
         
         if [[ "$schema_agent_count" == "$config_agent_count" ]]; then
@@ -3233,7 +2943,7 @@ EOF
         cp "$backup" "$config" && success "Restored config backup"
         
         # Start gateway with old version
-        openclaw gateway start >/dev/null 2>&1 || warn "Gateway start failed (may already be running)"
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
         sleep 3
         
         # Verify rollback
@@ -3244,7 +2954,7 @@ EOF
             echo -e "${RED}Rollback may have failed. Manual recovery:${NC}"
             echo "  npm install -g openclaw@$current_version"
             echo "  cp $backup $config"
-            echo "  openclaw gateway start"
+            echo "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist"
         fi
         
         echo ""
@@ -3256,18 +2966,8 @@ EOF
     echo ""
     success "=== Upgrade complete: $current_version → $target_version ==="
     
-    # Record in version history (BobNet tracked)
-    local now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local tmp_file=$(mktemp)
-    jq --arg ver "$target_version" --arg ts "$now_iso" --arg from "$current_version" '
-      .current = $ver |
-      .history = [{
-        "version": $ver,
-        "installedAt": $ts,
-        "status": "installed",
-        "note": ("Upgraded from " + $from)
-      }] + .history
-    ' "$VERSIONS_FILE" > "$tmp_file" && mv "$tmp_file" "$VERSIONS_FILE"
+    # Record in version history
+    echo "$(date -Iseconds): $current_version → $target_version (success)" >> "$VERSION_HISTORY"
     
     # Save success report
     local success_report="$CONFIG_DIR/upgrade-success-$(date +%Y%m%d_%H%M%S).log"
@@ -3281,18 +2981,14 @@ EOF
         diff <(jq -S . "$backup" 2>/dev/null) <(jq -S . "$config" 2>/dev/null) || echo "(no changes)"
     } > "$success_report" 2>&1
     
-    # Commit version tracking to git
-    (cd "$BOBNET_ROOT" && git add config/openclaw-versions.json && git commit -m "[Bob] chore: track OpenClaw upgrade $current_version → $target_version" 2>/dev/null) || true
-    
     echo ""
     echo "Report: $success_report"
-    echo "Versions: $VERSIONS_FILE"
-    echo ""
-    echo "Post-upgrade:"
-    echo "  bobnet upgrade --openclaw --pin    # Mark as stable"
+    echo "History: $VERSION_HISTORY"
     echo ""
     echo "Rollback (if needed):"
-    echo "  bobnet upgrade --openclaw --rollback"
+    echo "  npm install -g openclaw@$current_version"
+    echo "  cp $backup $config"
+    echo "  launchctl kickstart -k gui/\$(id -u)/ai.openclaw.gateway"
 }
 
 
@@ -3397,62 +3093,6 @@ EOF
                     ;;
             esac
             ;;
-        project)
-            local action="${1:-help}"
-            shift 2>/dev/null || true
-            case "$action" in
-                create)
-                    cmd_github_project_create "$@"
-                    ;;
-                list)
-                    cmd_github_project_list "$@"
-                    ;;
-                add)
-                    cmd_github_project_add "$@"
-                    ;;
-                status)
-                    cmd_github_project_status "$@"
-                    ;;
-                sync)
-                    cmd_github_project_sync "$@"
-                    ;;
-                set-status)
-                    cmd_github_project_set_status "$@"
-                    ;;
-                set-priority)
-                    cmd_github_project_set_priority "$@"
-                    ;;
-                help|-h|--help)
-                    cat <<'EOF'
-Usage: bobnet github project <command> [options]
-
-GitHub Project commands for cross-repo work tracking.
-
-COMMANDS:
-  create <title>       Create a new project
-  list                 List projects for organization
-  add <issue-url>      Add issue to default project
-  status [project-num] Show project status
-  sync [--project N]   Sync project field metadata to cache
-  set-status <issue> <status> [--project N]    Set issue status in project
-  set-priority <issue> <priority> [--project N] Set issue priority in project
-
-EXAMPLES:
-  bobnet github project create "Q1 Work"
-  bobnet github project add https://github.com/owner/repo/issues/123
-  bobnet github project status 4
-  bobnet github project sync
-  bobnet github project set-status 42 in-progress
-  bobnet github project set-status owner/repo#42 done
-  bobnet github project set-priority 42 high
-  bobnet github project set-priority owner/repo#15 medium
-EOF
-                    ;;
-                *)
-                    error "Unknown project command: $action (try 'bobnet github project help')"
-                    ;;
-            esac
-            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet github <command> [subcommand] [options]
@@ -3463,16 +3103,10 @@ COMMANDS:
   issue create        Create a new GitHub issue
   issue link          Link commits to issues
   milestone status    Query milestone progress
-  project create      Create a GitHub Project
-  project list        List organization projects
-  project add         Add issue to project
-  project status      Show project status
 
 EXAMPLES:
   bobnet github issue create "Feature: Add SSO" --label enhancement
   bobnet github milestone status "Q1 2026"
-  bobnet github project create "BobNet Work"
-  bobnet github project add https://github.com/owner/repo/issues/5
 
 See 'bobnet github <command> help' for more information on a specific command.
 EOF
@@ -3735,726 +3369,6 @@ EOF
     fi
 }
 
-# GitHub Project commands
-cmd_github_project_create() {
-    local title="${1:-}"
-    local owner=""
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --owner|-o)
-                owner="$2"
-                shift 2
-                ;;
-            -h|--help)
-                cat <<'EOF'
-Usage: bobnet github project create <title> [options]
-
-Create a new GitHub Project.
-
-OPTIONS:
-  --owner, -o <org>   Organization owner (default: from current repo)
-
-EXAMPLES:
-  bobnet github project create "Q1 Work"
-  bobnet github project create "BobNet Work" --owner buildzero-tech
-EOF
-                return 0
-                ;;
-            *)
-                if [[ -z "$title" ]]; then
-                    title="$1"
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    [[ -z "$title" ]] && error "Usage: bobnet github project create <title> [--owner <org>]"
-    
-    # Get owner from current repo if not specified
-    if [[ -z "$owner" ]]; then
-        owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null) || {
-            error "Could not detect owner. Use --owner or run from a git repo."
-        }
-    fi
-    
-    echo "Creating project: $title (owner: $owner)"
-    
-    local result
-    result=$(gh project create --owner "$owner" --title "$title" --format json 2>&1) || {
-        error "Failed to create project: $result"
-    }
-    
-    local url number
-    url=$(echo "$result" | jq -r '.url')
-    number=$(echo "$result" | jq -r '.number')
-    
-    success "Created project #$number"
-    echo "$url"
-}
-
-cmd_github_project_list() {
-    local owner=""
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --owner|-o)
-                owner="$2"
-                shift 2
-                ;;
-            -h|--help)
-                cat <<'EOF'
-Usage: bobnet github project list [options]
-
-List GitHub Projects for an organization.
-
-OPTIONS:
-  --owner, -o <org>   Organization owner (default: from current repo)
-
-EXAMPLES:
-  bobnet github project list
-  bobnet github project list --owner buildzero-tech
-EOF
-                return 0
-                ;;
-            *)
-                shift
-                ;;
-        esac
-    done
-    
-    # Get owner from current repo if not specified
-    if [[ -z "$owner" ]]; then
-        owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null) || {
-            error "Could not detect owner. Use --owner or run from a git repo."
-        }
-    fi
-    
-    echo "Projects for $owner:"
-    gh project list --owner "$owner" --format json | jq -r '.projects[] | "  #\(.number): \(.title) (\(.items.totalCount) items)"'
-}
-
-cmd_github_project_add() {
-    local url="${1:-}"
-    local project=""
-    local owner=""
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --project|-p)
-                project="$2"
-                shift 2
-                ;;
-            --owner|-o)
-                owner="$2"
-                shift 2
-                ;;
-            -h|--help)
-                cat <<'EOF'
-Usage: bobnet github project add <issue-url> [options]
-
-Add an issue or PR to a GitHub Project.
-
-OPTIONS:
-  --project, -p <num>  Project number (default: from BOBNET_PROJECT env or 4)
-  --owner, -o <org>    Organization owner (default: from current repo)
-
-EXAMPLES:
-  bobnet github project add https://github.com/owner/repo/issues/123
-  bobnet github project add https://github.com/owner/repo/issues/5 --project 4
-EOF
-                return 0
-                ;;
-            *)
-                if [[ -z "$url" ]]; then
-                    url="$1"
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    [[ -z "$url" ]] && error "Usage: bobnet github project add <issue-url> [--project <num>]"
-    
-    # Get owner from current repo if not specified
-    if [[ -z "$owner" ]]; then
-        owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null) || {
-            error "Could not detect owner. Use --owner or run from a git repo."
-        }
-    fi
-    
-    # Default project from env or 4 (BobNet Work)
-    project="${project:-${BOBNET_PROJECT:-4}}"
-    
-    echo "Adding to project #$project: $url"
-    gh project item-add "$project" --owner "$owner" --url "$url" 2>&1 || {
-        error "Failed to add item to project"
-    }
-    success "Added to project"
-}
-
-cmd_github_project_status() {
-    local project="${1:-}"
-    local owner=""
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --owner|-o)
-                owner="$2"
-                shift 2
-                ;;
-            -h|--help)
-                cat <<'EOF'
-Usage: bobnet github project status [project-num] [options]
-
-Show GitHub Project status and items.
-
-OPTIONS:
-  project-num         Project number (default: from BOBNET_PROJECT env or 4)
-  --owner, -o <org>   Organization owner (default: from current repo)
-
-EXAMPLES:
-  bobnet github project status
-  bobnet github project status 4
-  bobnet github project status 4 --owner buildzero-tech
-EOF
-                return 0
-                ;;
-            *)
-                if [[ -z "$project" && "$1" =~ ^[0-9]+$ ]]; then
-                    project="$1"
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    # Get owner from current repo if not specified
-    if [[ -z "$owner" ]]; then
-        owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null) || {
-            error "Could not detect owner. Use --owner or run from a git repo."
-        }
-    fi
-    
-    # Default project from env or 4
-    project="${project:-${BOBNET_PROJECT:-4}}"
-    
-    echo "Project #$project ($owner):"
-    echo
-    
-    # Get project info
-    local items
-    items=$(gh project item-list "$project" --owner "$owner" --format json 2>&1) || {
-        error "Failed to fetch project: $items"
-    }
-    
-    # Display items grouped by repo
-    echo "$items" | jq -r '.items | group_by(.content.repository) | .[] | "[\(.[0].content.repository // "Draft")]", (.[] | "  #\(.content.number // "draft"): \(.content.title)"), ""'
-}
-
-cmd_github_project_sync() {
-    local project=""
-    local owner=""
-    local refresh=false
-    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/bobnet.json}"
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --project|-p)
-                project="$2"
-                shift 2
-                ;;
-            --owner|-o)
-                owner="$2"
-                shift 2
-                ;;
-            --refresh|-r)
-                refresh=true
-                shift
-                ;;
-            --schema)
-                schema_file="$2"
-                shift 2
-                ;;
-            -h|--help)
-                cat <<'EOF'
-Usage: bobnet github project sync [options]
-
-Sync GitHub Project field metadata to local cache.
-
-OPTIONS:
-  --project, -p <num>   Project number (default: from config)
-  --owner, -o <org>     Organization (default: from config)
-  --refresh, -r         Force refresh even if cache is valid
-  --schema <path>       Path to bobnet.json
-
-Caches Status and Priority field IDs and option values for use
-by set-status and other project commands.
-
-EXAMPLES:
-  bobnet github project sync
-  bobnet github project sync --project 4 --refresh
-EOF
-                return 0
-                ;;
-            *)
-                if [[ "$1" =~ ^[0-9]+$ ]]; then
-                    project="$1"
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    # Load config
-    if [[ ! -f "$schema_file" ]]; then
-        error "Schema file not found: $schema_file"
-    fi
-    
-    # Get defaults from config
-    if [[ -z "$owner" ]]; then
-        owner=$(jq -r '.github.org // empty' "$schema_file")
-        [[ -z "$owner" ]] && owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null)
-    fi
-    [[ -z "$owner" ]] && error "Could not determine organization. Use --owner or configure github.org in schema."
-    
-    if [[ -z "$project" ]]; then
-        project=$(jq -r '.github.defaultProject // empty' "$schema_file")
-    fi
-    [[ -z "$project" ]] && error "No project specified and no default configured."
-    
-    # Check cache TTL (24 hours)
-    local cached_at
-    cached_at=$(jq -r ".github.projects[\"$project\"].cachedAt // empty" "$schema_file")
-    if [[ -n "$cached_at" && "$refresh" != "true" ]]; then
-        local cached_ts now_ts
-        cached_ts=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$cached_at" "+%s" 2>/dev/null || echo 0)
-        now_ts=$(date "+%s")
-        local age=$((now_ts - cached_ts))
-        if [[ $age -lt 86400 ]]; then
-            echo "Cache valid (age: $((age / 3600))h). Use --refresh to force update."
-            return 0
-        fi
-    fi
-    
-    echo "Syncing project #$project from $owner..."
-    
-    # Get project node ID first
-    local project_id
-    project_id=$(gh project view "$project" --owner "$owner" --format json 2>/dev/null | jq -r '.id // empty')
-    if [[ -z "$project_id" ]]; then
-        error "Could not find project #$project for $owner"
-    fi
-    
-    # Get project name
-    local project_name
-    project_name=$(gh project view "$project" --owner "$owner" --format json 2>/dev/null | jq -r '.title // empty')
-    
-    echo "  Project: $project_name ($project_id)"
-    
-    # Get fields
-    local fields
-    fields=$(gh project field-list "$project" --owner "$owner" --format json 2>&1) || {
-        error "Failed to fetch fields: $fields"
-    }
-    
-    # Extract Status field
-    local status_field_id status_options
-    status_field_id=$(echo "$fields" | jq -r '.fields[] | select(.name == "Status") | .id // empty')
-    
-    if [[ -n "$status_field_id" ]]; then
-        echo "  Status field: $status_field_id"
-        status_options=$(echo "$fields" | jq -c '[.fields[] | select(.name == "Status") | .options[]? | {key: .name, value: .id}] | from_entries')
-        echo "  Status options: $(echo "$status_options" | jq -r 'keys | join(", ")')"
-    else
-        echo "  ⚠ No Status field found"
-        status_options="{}"
-    fi
-    
-    # Extract Priority field
-    local priority_field_id priority_options
-    priority_field_id=$(echo "$fields" | jq -r '.fields[] | select(.name == "Priority") | .id // empty')
-    
-    if [[ -n "$priority_field_id" ]]; then
-        echo "  Priority field: $priority_field_id"
-        priority_options=$(echo "$fields" | jq -c '[.fields[] | select(.name == "Priority") | .options[]? | {key: .name, value: .id}] | from_entries')
-        echo "  Priority options: $(echo "$priority_options" | jq -r 'keys | join(", ")')"
-    else
-        echo "  ⚠ No Priority field found"
-        priority_options="{}"
-    fi
-    
-    # Update schema file
-    local now_iso
-    now_iso=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
-    
-    local tmp_file
-    tmp_file=$(mktemp)
-    jq --arg proj "$project" \
-       --arg pid "$project_id" \
-       --arg name "$project_name" \
-       --arg sfid "$status_field_id" \
-       --argjson sopts "$status_options" \
-       --arg pfid "$priority_field_id" \
-       --argjson popts "$priority_options" \
-       --arg cached "$now_iso" \
-       '.github.projects[$proj] = {
-          "name": $name,
-          "projectId": $pid,
-          "statusField": (if $sfid != "" then {"id": $sfid, "options": $sopts} else null end),
-          "priorityField": (if $pfid != "" then {"id": $pfid, "options": $popts} else null end),
-          "cachedAt": $cached
-        }' "$schema_file" > "$tmp_file" && mv "$tmp_file" "$schema_file"
-    
-    success "Cached project metadata for #$project"
-}
-
-cmd_github_project_set_status() {
-    local issue=""
-    local status=""
-    local project=""
-    local owner=""
-    local repo=""
-    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/bobnet.json}"
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --project|-p)
-                project="$2"
-                shift 2
-                ;;
-            --owner|-o)
-                owner="$2"
-                shift 2
-                ;;
-            --repo|-r)
-                repo="$2"
-                shift 2
-                ;;
-            --schema)
-                schema_file="$2"
-                shift 2
-                ;;
-            -h|--help)
-                cat <<'EOF'
-Usage: bobnet github project set-status <issue> <status> [options]
-
-Set the status of an issue in a GitHub Project.
-
-ARGUMENTS:
-  issue           Issue number or owner/repo#num
-  status          Status value (todo, in-progress, done, or exact name)
-
-OPTIONS:
-  --project, -p <num>   Project number (default: from config)
-  --owner, -o <org>     Organization (default: from config)
-  --repo, -r <name>     Repository name (default: from current dir)
-
-STATUS ALIASES:
-  todo, backlog, open       → "Todo"
-  in-progress, wip, doing   → "In Progress"
-  done, closed, complete    → "Done"
-
-EXAMPLES:
-  bobnet github project set-status 42 in-progress
-  bobnet github project set-status buildzero-tech/bobnet-cli#42 done
-  bobnet github project set-status 42 "In Progress" --project 4
-EOF
-                return 0
-                ;;
-            *)
-                if [[ -z "$issue" ]]; then
-                    issue="$1"
-                elif [[ -z "$status" ]]; then
-                    status="$1"
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    [[ -z "$issue" ]] && error "Issue number required"
-    [[ -z "$status" ]] && error "Status value required"
-    
-    # Parse issue reference (owner/repo#num or just num)
-    local issue_num
-    if [[ "$issue" =~ ^([^/]+)/([^#]+)#([0-9]+)$ ]]; then
-        owner="${BASH_REMATCH[1]}"
-        repo="${BASH_REMATCH[2]}"
-        issue_num="${BASH_REMATCH[3]}"
-    elif [[ "$issue" =~ ^#?([0-9]+)$ ]]; then
-        issue_num="${BASH_REMATCH[1]}"
-    else
-        error "Invalid issue format: $issue (use N or owner/repo#N)"
-    fi
-    
-    # Load config
-    if [[ ! -f "$schema_file" ]]; then
-        error "Schema file not found: $schema_file"
-    fi
-    
-    # Get defaults
-    [[ -z "$owner" ]] && owner=$(jq -r '.github.org // empty' "$schema_file")
-    [[ -z "$owner" ]] && owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null)
-    [[ -z "$owner" ]] && error "Could not determine organization"
-    
-    [[ -z "$repo" ]] && repo=$(gh repo view --json name -q '.name' 2>/dev/null)
-    [[ -z "$repo" ]] && error "Could not determine repository"
-    
-    [[ -z "$project" ]] && project=$(jq -r '.github.defaultProject // empty' "$schema_file")
-    [[ -z "$project" ]] && error "No project specified and no default configured"
-    
-    # Check cache, sync if needed
-    local cached_at
-    cached_at=$(jq -r ".github.projects[\"$project\"].cachedAt // empty" "$schema_file")
-    if [[ -z "$cached_at" ]]; then
-        echo "No cache for project #$project, syncing..."
-        cmd_github_project_sync --project "$project" --owner "$owner" --schema "$schema_file" || {
-            error "Failed to sync project metadata"
-        }
-    fi
-    
-    # Normalize status alias
-    local normalized_status
-    local status_lower
-    status_lower=$(echo "$status" | tr '[:upper:]' '[:lower:]')
-    case "$status_lower" in
-        todo|backlog|open)
-            normalized_status="Todo"
-            ;;
-        in-progress|wip|doing|inprogress)
-            normalized_status="In Progress"
-            ;;
-        done|closed|complete|finished)
-            normalized_status="Done"
-            ;;
-        *)
-            # Try exact match
-            normalized_status="$status"
-            ;;
-    esac
-    
-    # Get field and option IDs from cache
-    local status_field_id option_id
-    status_field_id=$(jq -r ".github.projects[\"$project\"].statusField.id // empty" "$schema_file")
-    [[ -z "$status_field_id" ]] && error "No Status field cached for project #$project"
-    
-    option_id=$(jq -r ".github.projects[\"$project\"].statusField.options[\"$normalized_status\"] // empty" "$schema_file")
-    if [[ -z "$option_id" ]]; then
-        # List available options
-        local available
-        available=$(jq -r ".github.projects[\"$project\"].statusField.options | keys | join(\", \")" "$schema_file")
-        error "Unknown status '$normalized_status'. Available: $available"
-    fi
-    
-    # Get project ID
-    local project_id
-    project_id=$(jq -r ".github.projects[\"$project\"].projectId // empty" "$schema_file")
-    [[ -z "$project_id" ]] && error "No project ID cached"
-    
-    # Find the project item for this issue
-    local issue_url="https://github.com/$owner/$repo/issues/$issue_num"
-    echo "Finding item for $owner/$repo#$issue_num in project #$project..."
-    
-    local items item_id
-    items=$(gh project item-list "$project" --owner "$owner" --format json 2>&1) || {
-        error "Failed to list project items: $items"
-    }
-    
-    item_id=$(echo "$items" | jq -r ".items[] | select(.content.url == \"$issue_url\") | .id" | head -1)
-    
-    if [[ -z "$item_id" ]]; then
-        error "Issue #$issue_num not found in project #$project. Add it first: bobnet github project add $issue_url"
-    fi
-    
-    echo "Setting status to '$normalized_status'..."
-    
-    # Update the item
-    gh project item-edit --project-id "$project_id" --id "$item_id" \
-        --field-id "$status_field_id" --single-select-option-id "$option_id" 2>&1 || {
-        error "Failed to update status"
-    }
-    
-    success "Set $owner/$repo#$issue_num → $normalized_status"
-}
-
-cmd_github_project_set_priority() {
-    local issue=""
-    local priority=""
-    local project=""
-    local owner=""
-    local repo=""
-    local schema_file="${BOBNET_SCHEMA:-$HOME/.bobnet/ultima-thule/config/bobnet.json}"
-    
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --project|-p)
-                project="$2"
-                shift 2
-                ;;
-            --owner|-o)
-                owner="$2"
-                shift 2
-                ;;
-            --repo|-r)
-                repo="$2"
-                shift 2
-                ;;
-            --schema)
-                schema_file="$2"
-                shift 2
-                ;;
-            -h|--help)
-                cat <<'HELPDOC'
-Usage: bobnet github project set-priority <issue> <priority> [options]
-
-Set the priority of an issue in a GitHub Project.
-
-ARGUMENTS:
-  issue           Issue number or owner/repo#num
-  priority        Priority value (high, medium, low, deferred, waiting)
-
-OPTIONS:
-  --project, -p <num>   Project number (default: from config)
-  --owner, -o <org>     Organization (default: from config)
-  --repo, -r <name>     Repository name (default: from current dir)
-
-PRIORITY VALUES:
-  high, h, p0, critical    → "High"
-  medium, med, m, p1       → "Medium"
-  low, l, p2               → "Low"
-  deferred, defer, later   → "Deferred"
-  waiting, blocked, wait   → "Waiting"
-
-EXAMPLES:
-  bobnet github project set-priority 42 high
-  bobnet github project set-priority buildzero-tech/bobnet-cli#42 medium
-  bobnet github project set-priority 42 deferred --project 4
-HELPDOC
-                return 0
-                ;;
-            *)
-                if [[ -z "$issue" ]]; then
-                    issue="$1"
-                elif [[ -z "$priority" ]]; then
-                    priority="$1"
-                fi
-                shift
-                ;;
-        esac
-    done
-    
-    [[ -z "$issue" ]] && error "Issue number required"
-    [[ -z "$priority" ]] && error "Priority value required"
-    
-    # Parse issue reference (owner/repo#num or just num)
-    local issue_num
-    if [[ "$issue" =~ ^([^/]+)/([^#]+)#([0-9]+)$ ]]; then
-        owner="${BASH_REMATCH[1]}"
-        repo="${BASH_REMATCH[2]}"
-        issue_num="${BASH_REMATCH[3]}"
-    elif [[ "$issue" =~ ^#?([0-9]+)$ ]]; then
-        issue_num="${BASH_REMATCH[1]}"
-    else
-        error "Invalid issue format: $issue (use N or owner/repo#N)"
-    fi
-    
-    # Load config
-    if [[ ! -f "$schema_file" ]]; then
-        error "Schema file not found: $schema_file"
-    fi
-    
-    # Get defaults
-    [[ -z "$owner" ]] && owner=$(jq -r '.github.org // empty' "$schema_file")
-    [[ -z "$owner" ]] && owner=$(gh repo view --json owner -q '.owner.login' 2>/dev/null)
-    [[ -z "$owner" ]] && error "Could not determine organization"
-    
-    [[ -z "$repo" ]] && repo=$(gh repo view --json name -q '.name' 2>/dev/null)
-    [[ -z "$repo" ]] && error "Could not determine repository"
-    
-    [[ -z "$project" ]] && project=$(jq -r '.github.defaultProject // empty' "$schema_file")
-    [[ -z "$project" ]] && error "No project specified and no default configured"
-    
-    # Check cache, sync if needed
-    local cached_at
-    cached_at=$(jq -r ".github.projects[\"$project\"].cachedAt // empty" "$schema_file")
-    if [[ -z "$cached_at" ]]; then
-        echo "No cache for project #$project, syncing..."
-        cmd_github_project_sync --project "$project" --owner "$owner" --schema "$schema_file" || {
-            error "Failed to sync project metadata"
-        }
-    fi
-    
-    # Normalize priority alias
-    local normalized_priority
-    local priority_lower
-    priority_lower=$(echo "$priority" | tr '[:upper:]' '[:lower:]')
-    case "$priority_lower" in
-        high|h|p0|critical)
-            normalized_priority="High"
-            ;;
-        medium|med|m|p1)
-            normalized_priority="Medium"
-            ;;
-        low|l|p2)
-            normalized_priority="Low"
-            ;;
-        deferred|defer|later)
-            normalized_priority="Deferred"
-            ;;
-        waiting|blocked|wait)
-            normalized_priority="Waiting"
-            ;;
-        *)
-            # Try exact match
-            normalized_priority="$priority"
-            ;;
-    esac
-    
-    # Get field and option IDs from cache
-    local priority_field_id option_id
-    priority_field_id=$(jq -r ".github.projects[\"$project\"].priorityField.id // empty" "$schema_file")
-    [[ -z "$priority_field_id" ]] && error "No Priority field cached for project #$project"
-    
-    option_id=$(jq -r ".github.projects[\"$project\"].priorityField.options[\"$normalized_priority\"] // empty" "$schema_file")
-    if [[ -z "$option_id" ]]; then
-        # List available options
-        local available
-        available=$(jq -r ".github.projects[\"$project\"].priorityField.options | keys | join(\", \")" "$schema_file")
-        error "Unknown priority '$normalized_priority'. Available: $available"
-    fi
-    
-    # Get project ID
-    local project_id
-    project_id=$(jq -r ".github.projects[\"$project\"].projectId // empty" "$schema_file")
-    [[ -z "$project_id" ]] && error "No project ID cached"
-    
-    # Find the project item for this issue
-    local issue_url="https://github.com/$owner/$repo/issues/$issue_num"
-    echo "Finding item for $owner/$repo#$issue_num in project #$project..."
-    
-    local items item_id
-    items=$(gh project item-list "$project" --owner "$owner" --format json 2>&1) || {
-        error "Failed to list project items: $items"
-    }
-    
-    item_id=$(echo "$items" | jq -r ".items[] | select(.content.url == \"$issue_url\") | .id" | head -1)
-    
-    if [[ -z "$item_id" ]]; then
-        error "Issue #$issue_num not found in project #$project. Add it first: bobnet github project add $issue_url"
-    fi
-    
-    echo "Setting priority to '$normalized_priority'..."
-    
-    # Update the item
-    gh project item-edit --project-id "$project_id" --id "$item_id" \
-        --field-id "$priority_field_id" --single-select-option-id "$option_id" 2>&1 || {
-        error "Failed to update priority"
-    }
-    
-    success "Set $owner/$repo#$issue_num → Priority: $normalized_priority"
-}
 cmd_incident() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -5138,10 +4052,6 @@ SYNC BEHAVIOR:
   3. Completed todos → Close linked GitHub issues
   4. Closed issues → Mark linked todos as completed
 
-ISSUE REFERENCE FORMATS:
-  #123                    Local repo issue
-  owner/repo#123          Cross-repo issue (full reference)
-
 OPTIONS:
   --dry-run    Show what would be synced without making changes
 
@@ -5187,52 +4097,26 @@ EOF
                 continue
             elif [[ "$line" =~ ^## && "$in_todos" == true ]]; then
                 break
-            fi
-            
-            # Match both formats:
-            # - Local: #123
-            # - Full ref: owner/repo#123
-            local status="" description="" issue_ref="" repo_ref="" issue_num=""
-            
-            if [[ "$in_todos" == true && "$line" =~ ^-[[:space:]]\[([ x])\][[:space:]]+(.+)[[:space:]]([a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+)#([0-9]+) ]]; then
-                # Full reference: owner/repo#123
-                status="${BASH_REMATCH[1]}"
-                description="${BASH_REMATCH[2]}"
-                repo_ref="${BASH_REMATCH[3]}"
-                issue_num="${BASH_REMATCH[4]}"
-                issue_ref="$repo_ref#$issue_num"
             elif [[ "$in_todos" == true && "$line" =~ ^-[[:space:]]\[([ x])\][[:space:]]+(.+)#([0-9]+) ]]; then
-                # Local reference: #123
-                status="${BASH_REMATCH[1]}"
-                description="${BASH_REMATCH[2]}"
-                issue_num="${BASH_REMATCH[3]}"
-                repo_ref=""
-                issue_ref="#$issue_num"
-            else
-                continue
-            fi
-            
-            # Build gh command with optional --repo
-            local gh_repo_flag=""
-            if [[ -n "$repo_ref" ]]; then
-                gh_repo_flag="--repo $repo_ref"
-            fi
-            
-            # Sync completed todos → close issues
-            if [[ "$status" == "x" ]]; then
-                echo "  $agent: Todo $issue_ref completed → would close issue"
+                local status="${BASH_REMATCH[1]}"
+                local description="${BASH_REMATCH[2]}"
+                local issue_num="${BASH_REMATCH[3]}"
                 
-                if [[ "$dry_run" == false ]]; then
-                    # shellcheck disable=SC2086
-                    gh issue close "$issue_num" $gh_repo_flag -c "Completed via agent todo sync" 2>/dev/null || {
-                        warn "Failed to close issue $issue_ref"
-                    }
+                # Sync completed todos → close issues
+                if [[ "$status" == "x" ]]; then
+                    echo "  $agent: Todo #$issue_num completed → would close issue"
+                    
+                    if [[ "$dry_run" == false ]]; then
+                        gh issue close "$issue_num" -c "Completed via agent todo sync" 2>/dev/null || {
+                            warn "Failed to close issue #$issue_num"
+                        }
+                    fi
+                    
+                    ((synced++))
+                else
+                    echo "  $agent: Todo #$issue_num pending → would update issue"
+                    ((skipped++))
                 fi
-                
-                ((synced++))
-            else
-                echo "  $agent: Todo $issue_ref pending → would update issue"
-                ((skipped++))
             fi
         done < "$memory_file"
     done
@@ -5280,14 +4164,14 @@ EOF
     esac
     
     # Get agent's Signal group info from schema
-    local group_id=$(jq -r --arg a "$agent" '.bindings[] | select(.agentId == $a and .channel == "signal" and .groupId) | .groupId' "$AGENTS_SCHEMA" 2>/dev/null)
-    local base_name=$(jq -r --arg a "$agent" '.bindings[] | select(.agentId == $a and .channel == "signal" and .groupId) | .groupName' "$AGENTS_SCHEMA" 2>/dev/null)
+    local group_id=$(jq -r --arg a "$agent" '.bindings[] | select(.agentId == $a and .channel == "signal" and .groupId) | .groupId' "$BOBNET_SCHEMA" 2>/dev/null)
+    local base_name=$(jq -r --arg a "$agent" '.bindings[] | select(.agentId == $a and .channel == "signal" and .groupId) | .groupName' "$BOBNET_SCHEMA" 2>/dev/null)
     
     [[ -z "$group_id" || "$group_id" == "null" ]] && error "No Signal group found for agent '$agent'"
     [[ -z "$base_name" || "$base_name" == "null" ]] && base_name="$agent"
     
     # Get Signal account from schema
-    local account=$(jq -r '.channels.signal.account // "+14439063521"' "$AGENTS_SCHEMA" 2>/dev/null)
+    local account=$(jq -r '.channels.signal.account // "+14439063521"' "$BOBNET_SCHEMA" 2>/dev/null)
     
     # Build new group name
     local new_name="$base_name"
