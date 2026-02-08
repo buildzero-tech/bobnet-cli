@@ -3549,6 +3549,72 @@ EOF
     esac
 }
 
+# GitHub API helpers
+find_milestone() {
+    local repo="$1"
+    local milestone_name="$2"
+    gh api "repos/$repo/milestones" --jq ".[] | select(.title == \"$milestone_name\") | .number" 2>/dev/null | head -1
+}
+
+ensure_milestone() {
+    local repo="$1"
+    local milestone_name="$2"
+    local description="$3"
+    
+    local existing=$(find_milestone "$repo" "$milestone_name")
+    if [[ -n "$existing" ]]; then
+        echo "$existing"
+        return 0
+    fi
+    
+    local result=$(gh api -X POST "repos/$repo/milestones" \
+        -f title="$milestone_name" \
+        -f description="$description" \
+        --jq '.number' 2>/dev/null)
+    echo "$result"
+}
+
+get_repo_labels() {
+    local repo="$1"
+    gh api "repos/$repo/labels" --jq '.[].name' 2>/dev/null
+}
+
+map_type_to_label() {
+    local type="$1"
+    local labels="$2"
+    
+    case "$type" in
+        Features*|feat*)
+            echo "$labels" | grep -i "^enhancement$\|^feature$" | head -1
+            ;;
+        Documentation*|docs*)
+            echo "$labels" | grep -i "^documentation$" | head -1
+            ;;
+        Testing*|test*)
+            echo "$labels" | grep -i "^testing$" | head -1
+            ;;
+        Maintenance*|chore*)
+            echo "$labels" | grep -i "^maintenance$\|^chore$" | head -1
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+ensure_label() {
+    local repo="$1"
+    local label_name="$2"
+    local color="${3:-fbca04}"
+    local description="${4:-}"
+    
+    gh api "repos/$repo/labels/$label_name" >/dev/null 2>&1 && return 0
+    gh api -X POST "repos/$repo/labels" \
+        -f name="$label_name" \
+        -f color="$color" \
+        -f description="$description" >/dev/null 2>&1
+}
+
 # Parse spec file for key fields
 parse_spec_file() {
     local spec_file="$1"
@@ -3565,10 +3631,18 @@ parse_spec_file() {
             echo "$ms"
             ;;
         primary-repo)
-            grep -m1 "^\*\*Primary Repository:\*\*" "$spec_file" | sed 's/^\*\*Primary Repository:\*\* *//'
+            # Look in "This Spec's Context" section first
+            local repo=$(awk '/^## This Spec/{flag=1; next} /^##/{flag=0} flag' "$spec_file" | grep -m1 "\*\*Primary Repository:\*\*" | sed 's/.*\*\*Primary Repository:\*\* *//')
+            # Fallback to top-level if not found
+            [[ -z "$repo" ]] && repo=$(grep -m1 "^\*\*Primary Repository:\*\*" "$spec_file" | sed 's/^\*\*Primary Repository:\*\* *//')
+            echo "$repo"
             ;;
         additional-repos)
-            grep -m1 "^\*\*Additional Repos:\*\*" "$spec_file" | sed 's/^\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//'
+            # Look in "This Spec's Context" section first
+            local repos=$(awk '/^## This Spec/{flag=1; next} /^##/{flag=0} flag' "$spec_file" | grep -m1 "\*\*Additional Repos:\*\*" | sed 's/.*\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//')
+            # Fallback to top-level if not found
+            [[ -z "$repos" ]] && repos=$(grep -m1 "^\*\*Additional Repos:\*\*" "$spec_file" | sed 's/^\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//')
+            echo "$repos"
             ;;
     esac
 }
@@ -3769,8 +3843,47 @@ EOF
         return 0
     fi
     
-    # TODO: Implement issue creation in next commit
-    error "Issue creation not yet implemented (coming in next commit)"
+    # Ensure milestone exists in primary repo
+    info "Checking milestone in $primary_repo..."
+    local milestone_num=$(ensure_milestone "$primary_repo" "$spec_milestone" "Enforcement system guaranteeing all significant agent work is tracked in GitHub.")
+    
+    if [[ -z "$milestone_num" ]]; then
+        error "Failed to create/find milestone: $spec_milestone"
+    fi
+    
+    success "Milestone: $spec_milestone (#$milestone_num)"
+    
+    # Discover labels in primary repo
+    info "Discovering labels in $primary_repo..."
+    local repo_labels=$(get_repo_labels "$primary_repo")
+    
+    # Ensure required labels exist
+    ensure_label "$primary_repo" "epic" "5319e7" "Parent tracking issue for a phase or feature group"
+    ensure_label "$primary_repo" "enhancement" "a2eeef" "New feature or request"
+    ensure_label "$primary_repo" "documentation" "0075ca" "Improvements or additions to documentation"
+    ensure_label "$primary_repo" "testing" "1d76db" "Testing infrastructure and test cases"
+    ensure_label "$primary_repo" "maintenance" "fbca04" "Maintenance and tooling"
+    
+    # Refresh label list after ensuring
+    repo_labels=$(get_repo_labels "$primary_repo")
+    success "Labels ready"
+    
+    echo ""
+    info "Ready to create issues"
+    echo ""
+    echo "This will create:"
+    echo "  - $epic_count Epic parent issue(s)"
+    echo "  - Work item issues under each Epic"
+    echo "  - All linked to milestone: $spec_milestone"
+    echo ""
+    read -p "Proceed with issue creation? [y/N] " -r
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        warn "Cancelled by user"
+        return 1
+    fi
+    
+    # TODO: Implement Epic and work item creation in next commit
+    error "Epic/work item creation not yet implemented (coming in next commit)"
 }
 
 cmd_github_issue_create() {
