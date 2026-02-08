@@ -4014,11 +4014,63 @@ EOF
     echo ""
     info "Updating spec file with issue numbers..."
     
-    # TODO: Update spec file with issue numbers in next commit
-    warn "Spec file update not yet implemented - you'll need to add issue numbers manually"
+    # Create temp file for updates
+    local temp_spec=$(mktemp)
+    cp "$spec_file" "$temp_spec"
+    
+    # Update Epic issue numbers
+    for update in "${epic_updates[@]}"; do
+        IFS='|' read -r line_num repo issue_num <<< "$update"
+        
+        # Find the "**Epic Issue:**" line (usually line_num + 2)
+        local search_start=$((line_num))
+        local search_end=$((line_num + 10))
+        
+        # Update the Epic Issue line
+        awk -v start="$search_start" -v end="$search_end" -v repo="$repo" -v num="$issue_num" '
+            NR >= start && NR <= end && /\*\*Epic Issue:\*\*/ {
+                sub(/\*\*Epic Issue:\*\* .*/, "**Epic Issue:** #" num)
+            }
+            { print }
+        ' "$temp_spec" > "${temp_spec}.tmp" && mv "${temp_spec}.tmp" "$temp_spec"
+    done
+    
+    # Update work item issue numbers
+    for update in "${item_updates[@]}"; do
+        IFS='|' read -r epic_line category item_title repo issue_num <<< "$update"
+        
+        # Escape special regex characters in title
+        local escaped_title=$(echo "$item_title" | sed 's/[][\/.^$*]/\\&/g')
+        
+        # Find and update the work item line
+        # Add issue number if not already present
+        local issue_ref
+        if [[ "$repo" == "$primary_repo" ]]; then
+            issue_ref=" #$issue_num"
+        else
+            issue_ref=" $repo#$issue_num"
+        fi
+        
+        awk -v title="$escaped_title" -v ref="$issue_ref" '
+            $0 ~ title && /^- / && !/( #[0-9]+| [a-z-]+\/[a-z-]+#[0-9]+)$/ {
+                print $0 ref
+                next
+            }
+            { print }
+        ' "$temp_spec" > "${temp_spec}.tmp" && mv "${temp_spec}.tmp" "$temp_spec"
+    done
+    
+    # Replace original spec file
+    mv "$temp_spec" "$spec_file"
+    success "Spec file updated with issue numbers"
     
     echo ""
     success "Issue creation complete!"
+    echo ""
+    info "Next steps:"
+    echo "  1. Review the updated spec file: $spec_file"
+    echo "  2. Commit the changes: git add $spec_file && git commit -m 'docs(spec): add GitHub issue references'"
+    echo "  3. Start implementation: bobnet work start <issue-number>"
 }
 
 cmd_github_issue_create() {
