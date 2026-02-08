@@ -3615,6 +3615,50 @@ ensure_label() {
         -f description="$description" >/dev/null 2>&1
 }
 
+# Create Epic issue
+create_epic_issue() {
+    local repo="$1"
+    local title="$2"
+    local milestone="$3"
+    local body="$4"
+    
+    local issue_url=$(gh issue create \
+        --repo "$repo" \
+        --title "$title" \
+        --label "epic" \
+        --milestone "$milestone" \
+        --body "$body" 2>&1)
+    
+    # Extract issue number from URL
+    echo "$issue_url" | grep -o '[0-9]*$'
+}
+
+# Create work item issue
+create_work_item() {
+    local repo="$1"
+    local title="$2"
+    local label="$3"
+    local milestone="$4"
+    local epic_number="$5"
+    local epic_repo="$6"
+    
+    local body="Part of Epic "
+    if [[ "$repo" == "$epic_repo" ]]; then
+        body+="#${epic_number}"
+    else
+        body+="${epic_repo}#${epic_number}"
+    fi
+    
+    local issue_url=$(gh issue create \
+        --repo "$repo" \
+        --title "$title" \
+        --label "$label" \
+        --milestone "$milestone" \
+        --body "$body" 2>&1)
+    
+    echo "$issue_url" | grep -o '[0-9]*$'
+}
+
 # Parse spec file for key fields
 parse_spec_file() {
     local spec_file="$1"
@@ -3882,8 +3926,99 @@ EOF
         return 1
     fi
     
-    # TODO: Implement Epic and work item creation in next commit
-    error "Epic/work item creation not yet implemented (coming in next commit)"
+    echo ""
+    info "Creating issues..."
+    
+    # Track created issues for spec file update
+    declare -a epic_updates=()
+    declare -a item_updates=()
+    
+    # Create Epics and work items
+    while IFS='|' read -r line_num epic_title; do
+        local epic_repo=$(parse_epic_section "$spec_file" "$line_num" repository)
+        [[ -z "$epic_repo" ]] && epic_repo="$primary_repo"
+        
+        # Ensure milestone exists in Epic's repo (might be different from primary)
+        if [[ "$epic_repo" != "$primary_repo" ]]; then
+            local epic_milestone_num=$(ensure_milestone "$epic_repo" "$spec_milestone" "")
+            # Also ensure labels in this repo
+            ensure_label "$epic_repo" "epic" "5319e7" "Parent tracking issue for a phase or feature group"
+        fi
+        
+        # Clean Epic title (remove emoji)
+        local clean_epic_title=$(echo "$epic_title" | sed 's/ 📋$//')
+        
+        # Create Epic issue body
+        local epic_body="Parent tracking issue for $clean_epic_title phase.
+
+**Spec:** $(basename "$spec_file")
+
+**Work Items:** See child issues"
+        
+        info "Creating Epic: $clean_epic_title ($epic_repo)"
+        local epic_number=$(create_epic_issue "$epic_repo" "Epic: $clean_epic_title" "$spec_milestone" "$epic_body")
+        
+        if [[ -z "$epic_number" ]]; then
+            error "Failed to create Epic issue: $clean_epic_title"
+        fi
+        
+        success "  Created Epic $epic_repo#$epic_number"
+        epic_updates+=("$line_num|$epic_repo|$epic_number")
+        
+        # Extract and create work items for this Epic
+        local work_items=$(extract_work_items "$spec_file" "$line_num")
+        
+        while IFS='|' read -r category item_title; do
+            [[ -z "$item_title" ]] && continue
+            
+            # Determine repo for this work item (check if it has repo prefix)
+            local item_repo="$epic_repo"
+            if [[ "$item_title" =~ ^.*\ ([a-z-]+/[a-z-]+)#[0-9]+$ ]]; then
+                # Already has issue number, skip
+                continue
+            elif [[ "$item_title" =~ ^.*\ (buildzero-tech/[a-z-]+)$ ]]; then
+                # Has repo suffix (e.g., "item buildzero-tech/ultima-thule")
+                item_repo=$(echo "$item_title" | grep -o 'buildzero-tech/[a-z-]*$')
+                item_title=$(echo "$item_title" | sed 's/ buildzero-tech\/[a-z-]*$//')
+            fi
+            
+            # Ensure milestone/labels in item repo if different
+            if [[ "$item_repo" != "$primary_repo" && "$item_repo" != "$epic_repo" ]]; then
+                ensure_milestone "$item_repo" "$spec_milestone" ""
+                ensure_label "$item_repo" "enhancement" "a2eeef" ""
+                ensure_label "$item_repo" "documentation" "0075ca" ""
+                ensure_label "$item_repo" "testing" "1d76db" ""
+                ensure_label "$item_repo" "maintenance" "fbca04" ""
+            fi
+            
+            # Map category to label
+            local item_label=$(map_type_to_label "$category" "$repo_labels")
+            [[ -z "$item_label" ]] && item_label="enhancement"
+            
+            # Create work item
+            local item_number=$(create_work_item "$item_repo" "$item_title" "$item_label" "$spec_milestone" "$epic_number" "$epic_repo")
+            
+            if [[ -z "$item_number" ]]; then
+                warn "  Failed to create work item: $item_title"
+                continue
+            fi
+            
+            echo "  → Created $item_repo#$item_number: $item_title"
+            item_updates+=("$line_num|$category|$item_title|$item_repo|$item_number")
+        done <<< "$work_items"
+        
+        echo ""
+    done <<< "$epics"
+    
+    success "All issues created!"
+    echo ""
+    info "Updating spec file with issue numbers..."
+    
+    # TODO: Update spec file with issue numbers in next commit
+    warn "Spec file update not yet implemented - you'll need to add issue numbers manually"
+    
+    echo ""
+    success "Issue creation complete!"
 }
 
 cmd_github_issue_create() {
