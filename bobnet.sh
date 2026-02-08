@@ -2460,6 +2460,437 @@ EOF
     esac
 }
 
+
+cmd_trust() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        init) trust_init "$@" ;;
+        add) trust_add "$@" ;;
+        list) trust_list "$@" ;;
+        show) trust_show "$@" ;;
+        set) trust_set "$@" ;;
+        export) trust_export "$@" ;;
+        import) trust_import "$@" ;;
+        -h|--help|help)
+            cat <<'EOF'
+USAGE: bobnet trust <command> [options]
+
+COMMANDS:
+  init                Initialize trust registry
+  add <email>         Add contact
+  list                List contacts
+  show <email>        Show contact details
+  set <email>         Update trust level/score
+  export              Export to vCard
+  import              Import from source
+
+Run 'bobnet trust <command> --help' for details.
+EOF
+            ;;
+        *) error "Unknown trust command: $subcmd" ;;
+    esac
+}
+
+trust_init() {
+    local user="$USER"
+    local force=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            --force|-f) force=true; shift ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet trust init [OPTIONS]
+
+Initialize trust registry database.
+
+OPTIONS:
+  --user <name>    User name (default: current user)
+  --force, -f      Overwrite existing registry
+
+EXAMPLES:
+  bobnet trust init
+  bobnet trust init --user penny
+EOF
+                return 0 ;;
+            *) shift ;;
+        esac
+    done
+    
+    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    local schema_file="$BOBNET_ROOT/scripts/sql/trust-registry-schema.sql"
+    
+    # Check if already exists
+    if [[ -f "$registry_db" && "$force" != "true" ]]; then
+        error "Trust registry already exists at $registry_db. Use --force to overwrite."
+    fi
+    
+    # Check schema exists
+    if [[ ! -f "$schema_file" ]]; then
+        error "Schema file not found: $schema_file"
+    fi
+    
+    # Create config directory
+    mkdir -p "$BOBNET_ROOT/config"
+    
+    # Initialize database
+    if [[ "$force" == "true" && -f "$registry_db" ]]; then
+        rm -f "$registry_db"
+    fi
+    
+    sqlite3 "$registry_db" < "$schema_file" || error "Failed to initialize trust registry"
+    
+    success "Trust registry initialized: $registry_db"
+}
+
+trust_add() {
+    local email=""
+    local name=""
+    local user="$USER"
+    local trust_level="new"
+    local trust_score=0.0
+    local source="manual"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            --name) name="$2"; shift 2 ;;
+            --level) trust_level="$2"; shift 2 ;;
+            --score) trust_score="$2"; shift 2 ;;
+            --source) source="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet trust add <email> [OPTIONS]
+
+Add contact to trust registry.
+
+OPTIONS:
+  --user <name>       User name (default: current user)
+  --name <name>       Contact name
+  --level <level>     Trust level (owner, trusted, known, new, blocked)
+  --score <score>     Trust score (-1.0 to 1.0)
+  --source <source>   Source (manual, google, icloud, signal)
+
+EXAMPLES:
+  bobnet trust add taylor@example.com --name "Taylor" --level known
+  bobnet trust add james@buildzero.tech --name "James" --level owner --score 1.0
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$email" ]]; then
+                    email="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$email" ]] && error "Email required. Usage: bobnet trust add <email> [--name <name>]"
+    
+    # Normalize email
+    email=$(echo "$email" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    
+    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
+    
+    # Check if contact exists
+    local exists=$(sqlite3 "$registry_db" "SELECT COUNT(*) FROM contacts WHERE email = '$email'" 2>/dev/null)
+    
+    if [[ "$exists" -gt 0 ]]; then
+        error "Contact already exists: $email"
+    fi
+    
+    # Insert contact
+    local now=$(date +%s)
+    sqlite3 "$registry_db" <<SQL
+INSERT INTO contacts (email, name, trust_level, trust_score, primary_source, created_at, updated_at)
+VALUES ('$email', '$name', '$trust_level', $trust_score, '$source', $now, $now);
+SQL
+    
+    if [[ $? -eq 0 ]]; then
+        success "Added contact: $email ($trust_level, score: $trust_score)"
+    else
+        error "Failed to add contact"
+    fi
+}
+
+trust_list() {
+    local user="$USER"
+    local state="active"
+    local trust_level=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            --state) state="$2"; shift 2 ;;
+            --level) trust_level="$2"; shift 2 ;;
+            --all) state=""; shift ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet trust list [OPTIONS]
+
+List contacts in trust registry.
+
+OPTIONS:
+  --user <name>       User name (default: current user)
+  --state <state>     Filter by state (active, archived, deleted)
+  --level <level>     Filter by trust level
+  --all               Show all contacts (including archived/deleted)
+
+EXAMPLES:
+  bobnet trust list
+  bobnet trust list --level trusted
+  bobnet trust list --all
+EOF
+                return 0 ;;
+            *) shift ;;
+        esac
+    done
+    
+    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
+    
+    # Build query
+    local where_clause=""
+    if [[ -n "$state" ]]; then
+        where_clause="WHERE state = '$state'"
+    fi
+    if [[ -n "$trust_level" ]]; then
+        if [[ -n "$where_clause" ]]; then
+            where_clause="$where_clause AND trust_level = '$trust_level'"
+        else
+            where_clause="WHERE trust_level = '$trust_level'"
+        fi
+    fi
+    
+    sqlite3 "$registry_db" <<SQL
+.mode column
+.headers on
+SELECT 
+    email,
+    name,
+    trust_level,
+    ROUND(trust_score, 2) as score,
+    state,
+    emails_sent,
+    emails_received
+FROM contacts
+$where_clause
+ORDER BY trust_score DESC, email;
+SQL
+}
+
+trust_show() {
+    local email=""
+    local user="$USER"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet trust show <email> [OPTIONS]
+
+Show contact details.
+
+OPTIONS:
+  --user <name>    User name (default: current user)
+
+EXAMPLES:
+  bobnet trust show taylor@example.com
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$email" ]]; then
+                    email="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$email" ]] && error "Email required. Usage: bobnet trust show <email>"
+    
+    email=$(echo "$email" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    
+    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
+    
+    # Get contact details
+    sqlite3 "$registry_db" <<SQL
+.mode list
+SELECT 
+    'Email: ' || email || '
+Name: ' || COALESCE(name, '(none)') || '
+Trust Level: ' || trust_level || '
+Trust Score: ' || ROUND(trust_score, 2) || '
+State: ' || state || '
+Source: ' || COALESCE(primary_source, 'manual') || '
+Emails Sent: ' || emails_sent || '
+Emails Received: ' || emails_received || '
+Created: ' || datetime(created_at, 'unixepoch') || '
+Updated: ' || datetime(updated_at, 'unixepoch') || '
+Last Interaction: ' || COALESCE(datetime(last_interaction_at, 'unixepoch'), 'never')
+FROM contacts
+WHERE email = '$email';
+SQL
+    
+    # Get trust history
+    echo ""
+    echo "Trust History:"
+    sqlite3 "$registry_db" <<SQL
+.mode column
+.headers on
+SELECT 
+    datetime(timestamp, 'unixepoch') as timestamp,
+    event_type,
+    ROUND(trust_delta, 2) as delta,
+    ROUND(old_score, 2) as old_score,
+    ROUND(new_score, 2) as new_score
+FROM trust_events
+WHERE contact_id = (SELECT id FROM contacts WHERE email = '$email')
+ORDER BY timestamp DESC
+LIMIT 10;
+SQL
+}
+
+trust_set() {
+    local email=""
+    local user="$USER"
+    local trust_level=""
+    local trust_score=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            --level) trust_level="$2"; shift 2 ;;
+            --score) trust_score="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet trust set <email> [OPTIONS]
+
+Update contact trust level or score.
+
+OPTIONS:
+  --user <name>     User name (default: current user)
+  --level <level>   Set trust level (owner, trusted, known, new, blocked)
+  --score <score>   Set trust score (-1.0 to 1.0)
+
+EXAMPLES:
+  bobnet trust set taylor@example.com --level trusted
+  bobnet trust set spam@example.com --score -1.0 --level blocked
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$email" ]]; then
+                    email="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$email" ]] && error "Email required. Usage: bobnet trust set <email> --level <level> or --score <score>"
+    [[ -z "$trust_level" && -z "$trust_score" ]] && error "Must specify --level or --score"
+    
+    email=$(echo "$email" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+    
+    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
+    
+    # Get current values
+    local current=$(sqlite3 "$registry_db" "SELECT trust_level, trust_score FROM contacts WHERE email = '$email'")
+    [[ -z "$current" ]] && error "Contact not found: $email"
+    
+    local old_level=$(echo "$current" | cut -d'|' -f1)
+    local old_score=$(echo "$current" | cut -d'|' -f2)
+    
+    # Update contact
+    local updates=""
+    if [[ -n "$trust_level" ]]; then
+        updates="trust_level = '$trust_level'"
+    fi
+    if [[ -n "$trust_score" ]]; then
+        if [[ -n "$updates" ]]; then
+            updates="$updates, "
+        fi
+        updates="${updates}trust_score = $trust_score"
+    fi
+    
+    local now=$(date +%s)
+    sqlite3 "$registry_db" "UPDATE contacts SET $updates, updated_at = $now WHERE email = '$email'"
+    
+    # Log trust event if score changed
+    if [[ -n "$trust_score" ]]; then
+        local contact_id=$(sqlite3 "$registry_db" "SELECT id FROM contacts WHERE email = '$email'")
+        local delta=$(echo "$trust_score - $old_score" | bc)
+        
+        sqlite3 "$registry_db" <<SQL
+INSERT INTO trust_events (contact_id, timestamp, event_type, trust_delta, old_score, new_score)
+VALUES ($contact_id, $now, 'manual_update', $delta, $old_score, $trust_score);
+SQL
+    fi
+    
+    success "Updated contact: $email"
+    if [[ -n "$trust_level" ]]; then
+        echo "  Trust level: $old_level → $trust_level"
+    fi
+    if [[ -n "$trust_score" ]]; then
+        echo "  Trust score: $old_score → $trust_score"
+    fi
+}
+
+trust_export() {
+    local user="$USER"
+    local format="vcard"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            --format) format="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet trust export [OPTIONS]
+
+Export contacts to vCard format.
+
+OPTIONS:
+  --user <name>      User name (default: current user)
+  --format <format>  Export format (vcard)
+
+EXAMPLES:
+  bobnet trust export > contacts.vcf
+  bobnet trust export --user penny > penny-contacts.vcf
+EOF
+                return 0 ;;
+            *) shift ;;
+        esac
+    done
+    
+    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
+    
+    # Export to vCard
+    sqlite3 "$registry_db" -list "SELECT email, name, trust_level, trust_score, last_interaction_at FROM contacts WHERE state = 'active'" | \
+    while IFS='|' read -r email name trust_level trust_score last_interaction; do
+        cat <<VCARD
+BEGIN:VCARD
+VERSION:4.0
+FN:${name:-$email}
+EMAIL:$email
+X-TRUST-LEVEL:$trust_level
+X-TRUST-SCORE:$trust_score
+X-LAST-INTERACTION:$(date -r "$last_interaction" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "")
+END:VCARD
+VCARD
+    done
+}
+
+trust_import() {
+    warn "Import functionality not yet implemented. Planned for Phase 3."
+}
+
+
 cmd_restart() {
     # Parse arguments
     local delay=10
@@ -4235,6 +4666,7 @@ COMMANDS:
   unlock [key]        Unlock git-crypt
   lock                Lock git-crypt
   update              Update CLI to latest version
+  trust [cmd]         Contact trust management (init, add, list, show)
   restart             Restart gateway with broadcast warning
   upgrade             Upgrade OpenClaw with rollback support
 
@@ -4271,6 +4703,7 @@ bobnet_main() {
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
         update) cmd_update ;;
+        trust) shift; cmd_trust "$@" ;;
         restart) shift; cmd_restart "$@" ;;
         upgrade) shift; cmd_upgrade "$@" ;;
         help|--help|-h) cmd_help ;;
