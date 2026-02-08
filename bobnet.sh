@@ -4725,6 +4725,12 @@ cmd_docs() {
         release)
             cmd_docs_release "$@"
             ;;
+        release-notes)
+            cmd_docs_release_notes "$@"
+            ;;
+        project-template)
+            cmd_docs_project_template "$@"
+            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet docs <command> [options]
@@ -4734,12 +4740,16 @@ Documentation generation from git and GitHub data.
 COMMANDS:
   roadmap                 Generate ROADMAP.md from GitHub milestones
   changelog [version]     Generate CHANGELOG.md from commits
-  release <version>       Generate release notes
+  release <version>       Generate release notes (commit-based)
+  release-notes [tag]     Generate release notes from GitHub issues
+  project-template        Output GitHub Project board template
 
 EXAMPLES:
   bobnet docs roadmap
   bobnet docs changelog
   bobnet docs release v1.5.0
+  bobnet docs release-notes v1.5.0
+  bobnet docs project-template
 
 See 'bobnet docs <command> help' for more information.
 EOF
@@ -4828,15 +4838,15 @@ EOF
         
         # Group by type
         echo "### Added"
-        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         echo "### Changed"
-        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         echo "### Fixed"
-        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
     else
         # Generate for specific version
@@ -4854,15 +4864,15 @@ EOF
         fi
         
         echo "### Added"
-        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         echo "### Changed"
-        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         echo "### Fixed"
-        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         if [[ -n "$prev_tag" ]]; then
@@ -5210,6 +5220,286 @@ EOF
         echo "  - Update MEMORY.md: Mark todo [x] completed"
         echo "  - Run: bobnet todo sync (to sync with GitHub)"
     fi
+}
+
+cmd_docs_release_notes() {
+    local since_tag="${1:-}"
+    local repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet docs release-notes [tag] [options]
+
+Generate release notes from GitHub issues closed since a tag.
+
+Groups issues by label:
+- Features (enhancement/feature label)
+- Documentation (documentation label)
+- Maintenance (maintenance/chore label)
+- Bug Fixes (bug label)
+
+OPTIONS:
+  tag               Tag to generate notes since (default: latest tag)
+  --repo, -R <repo> Target repository (default: current repo)
+
+OUTPUT:
+  Markdown-formatted release notes grouped by category
+
+EXAMPLES:
+  bobnet docs release-notes v1.4.0
+  bobnet docs release-notes v1.4.0 --repo buildzero-tech/bobnet-cli
+  bobnet docs release-notes > releases/v1.5.0.md
+
+FORMAT:
+  # Release Notes
+
+  ## Features
+  - Feature A (#123)
+  - Feature B (#124)
+
+  ## Documentation
+  - Updated docs (#125)
+
+See: https://keepachangelog.com
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$since_tag" ]]; then
+                    since_tag="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    # Detect current repo if not specified
+    if [[ -z "$repo" ]]; then
+        repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+        [[ -z "$repo" ]] && error "Not in a git repository. Use --repo to specify target."
+    fi
+    
+    # Get latest tag if not specified
+    if [[ -z "$since_tag" ]]; then
+        since_tag=$(git describe --tags --abbrev=0 2>/dev/null)
+        [[ -z "$since_tag" ]] && error "No tags found. Specify a tag to generate notes since."
+    fi
+    
+    # Get tag date
+    local tag_date=$(git log -1 --format=%aI "$since_tag" 2>/dev/null)
+    [[ -z "$tag_date" ]] && error "Tag not found: $since_tag"
+    
+    info "Generating release notes since $since_tag ($tag_date)..."
+    
+    # Query closed issues since tag date
+    local issues=$(gh issue list \
+        --repo "$repo" \
+        --state closed \
+        --limit 500 \
+        --json number,title,labels,closedAt \
+        --jq ".[] | select(.closedAt >= \"$tag_date\")" 2>/dev/null)
+    
+    if [[ -z "$issues" ]] || [[ "$issues" == "[]" ]]; then
+        warn "No closed issues found since $since_tag"
+        return 0
+    fi
+    
+    # Group issues by label
+    local features=$(echo "$issues" | jq -r 'select(.labels[].name == "enhancement" or .labels[].name == "feature") | "- \(.title) (#\(.number))"' 2>/dev/null)
+    local docs=$(echo "$issues" | jq -r 'select(.labels[].name == "documentation") | "- \(.title) (#\(.number))"' 2>/dev/null)
+    local maintenance=$(echo "$issues" | jq -r 'select(.labels[].name == "maintenance" or .labels[].name == "chore") | "- \(.title) (#\(.number))"' 2>/dev/null)
+    local bugs=$(echo "$issues" | jq -r 'select(.labels[].name == "bug") | "- \(.title) (#\(.number))"' 2>/dev/null)
+    
+    # Output release notes
+    echo "# Release Notes"
+    echo ""
+    echo "**Since:** $since_tag"
+    echo ""
+    
+    if [[ -n "$features" ]]; then
+        echo "## ✨ Features"
+        echo ""
+        echo "$features"
+        echo ""
+    fi
+    
+    if [[ -n "$docs" ]]; then
+        echo "## 📚 Documentation"
+        echo ""
+        echo "$docs"
+        echo ""
+    fi
+    
+    if [[ -n "$maintenance" ]]; then
+        echo "## 🔧 Maintenance"
+        echo ""
+        echo "$maintenance"
+        echo ""
+    fi
+    
+    if [[ -n "$bugs" ]]; then
+        echo "## 🐛 Bug Fixes"
+        echo ""
+        echo "$bugs"
+        echo ""
+    fi
+    
+    # Count total
+    local total=$(echo "$issues" | jq 'length' 2>/dev/null)
+    echo "---"
+    echo ""
+    echo "**Total:** $total issue(s) closed"
+}
+
+cmd_docs_project_template() {
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+        cat <<'EOF'
+Usage: bobnet docs project-template
+
+Output GitHub Project board template with standard columns.
+
+Outputs recommended project board structure:
+- Not Started  - New work
+- In Progress  - Active work
+- Blocked      - Waiting on dependencies
+- Review       - Ready for review
+- Done         - Completed
+
+EXAMPLES:
+  bobnet docs project-template
+  bobnet docs project-template > .github/project-template.md
+
+MANUAL SETUP:
+  1. Go to https://github.com/orgs/<org>/projects/new
+  2. Create "Board" view
+  3. Add status column with these values
+  4. Configure automation (optional)
+
+AUTOMATION COMMANDS:
+  # Set issue status (manual for now)
+  gh issue comment <num> --body "Status: In Progress"
+  
+  # Project item management requires GraphQL
+  # See: gh api graphql
+EOF
+        return 0
+    fi
+    
+    cat <<'EOF'
+# GitHub Project Board Template
+
+**Recommended structure for BobNet project boards**
+
+## Status Column Values
+
+| Status | Description | When to Use |
+|--------|-------------|-------------|
+| **Not Started** | New work, ready to pick up | Issue created, not yet assigned |
+| **In Progress** | Active development | Work started (`bobnet work start`) |
+| **Blocked** | Waiting on dependencies | External blocker, needs resolution |
+| **Review** | Ready for review | PR open, awaiting review |
+| **Done** | Completed | Issue closed, work merged |
+
+## Setup Instructions
+
+### 1. Create Project
+
+```bash
+# Via GitHub UI
+https://github.com/orgs/<org>/projects/new
+
+# Project name: BobNet Work
+# Template: Board
+```
+
+### 2. Configure Status Field
+
+Add "Status" single-select field with these options:
+
+- ⚪ Not Started (default)
+- 🔵 In Progress
+- 🔴 Blocked
+- 🟡 Review
+- 🟢 Done
+
+### 3. Configure Automation (Optional)
+
+**Auto-move to Done when issue closed:**
+- Project Settings → Workflows
+- Enable "Item closed" → Move to "Done"
+
+**Auto-move to In Progress when assigned:**
+- Enable "Item assigned" → Move to "In Progress"
+
+### 4. Add Issues to Project
+
+```bash
+# Add issue to project (requires project ID)
+gh project item-add <project-num> --owner <org> --url <issue-url>
+
+# Example
+gh project item-add 4 --owner buildzero-tech \
+  --url https://github.com/buildzero-tech/bobnet-cli/issues/52
+```
+
+## BobNet Integration
+
+### Current Commands
+
+```bash
+# Start work (assigns issue)
+bobnet work start 52
+
+# Complete work (closes issue, moves to Done via automation)
+bobnet work done 52
+
+# View assigned issues
+bobnet github my-issues
+```
+
+### Future Commands (Planned)
+
+```bash
+# Set project status directly
+bobnet github project set-status 52 "in-progress"
+
+# Move to blocked
+bobnet github project set-status 52 "blocked"
+```
+
+## Manual Status Updates
+
+Until `set-status` is implemented, update via GitHub UI:
+
+1. Open issue on GitHub
+2. In right sidebar, find Project
+3. Click status dropdown
+4. Select new status
+
+Or via comment pattern (requires custom automation):
+
+```bash
+gh issue comment 52 --body "Status: In Progress"
+```
+
+## Reference
+
+- **GitHub Projects Docs:** https://docs.github.com/en/issues/planning-and-tracking-with-projects
+- **GraphQL API:** https://docs.github.com/en/graphql/reference/mutations#updateprojectv2itemfieldvalue
+- **BobNet Pattern:** `~/.bobnet/ultima-thule/collective/patterns/coordination/work-tracking.md`
+
+---
+
+*Generated by: `bobnet docs project-template`*
+EOF
 }
 
 cmd_todo() {

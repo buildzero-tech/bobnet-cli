@@ -9,6 +9,7 @@ Comprehensive reference for all BobNet CLI commands.
 - [GitHub Integration](#github-integration)
 - [Git Attribution](#git-attribution)
 - [Todo Management](#todo-management)
+- [Release Documentation](#release-documentation)
 
 ---
 
@@ -479,6 +480,151 @@ bobnet github my-issues --repo buildzero-tech/bobnet-cli
 # 5. Continue with next issue
 bobnet work start 37
 ```
+
+---
+
+## Release Documentation
+
+### `bobnet docs release-notes`
+
+Generate release notes from GitHub issues closed since a tag.
+
+**Usage:**
+```bash
+bobnet docs release-notes [tag] [options]
+```
+
+**Options:**
+- `tag` — Tag to generate notes since (default: latest tag)
+- `--repo, -R <owner/repo>` — Target repository (default: current repo)
+
+**Output:**
+Groups issues by label:
+- **Features** (enhancement/feature label)
+- **Documentation** (documentation label)
+- **Maintenance** (maintenance/chore label)
+- **Bug Fixes** (bug label)
+
+**Examples:**
+```bash
+# Generate notes since latest tag
+bobnet docs release-notes
+
+# Generate notes since specific tag
+bobnet docs release-notes v1.4.0
+
+# Generate for different repo
+bobnet docs release-notes v1.4.0 --repo buildzero-tech/bobnet-cli
+
+# Save to file
+bobnet docs release-notes v1.5.0 > releases/v1.5.0.md
+```
+
+**Output Format:**
+```markdown
+# Release Notes
+
+**Since:** v1.4.0
+
+## ✨ Features
+
+- Feature A (#123)
+- Feature B (#124)
+
+## 📚 Documentation
+
+- Updated docs (#125)
+
+---
+
+**Total:** 15 issue(s) closed
+```
+
+**Notes:**
+- Queries all issues closed since the tag date
+- Automatically links issue numbers
+- Follows Keep a Changelog conventions
+
+---
+
+### `bobnet docs changelog`
+
+Generate CHANGELOG.md from conventional commits with issue references.
+
+**Usage:**
+```bash
+bobnet docs changelog [version]
+```
+
+**Options:**
+- `version` — Version to generate changelog for (default: unreleased)
+
+**Examples:**
+```bash
+# Generate unreleased changes
+bobnet docs changelog
+
+# Generate for specific version
+bobnet docs changelog v1.5.0
+
+# Update CHANGELOG.md
+bobnet docs changelog >> CHANGELOG.md
+```
+
+**Output Format:**
+```markdown
+# Changelog
+
+## [Unreleased]
+
+### Added
+- New feature ([#123](../../issues/123))
+
+### Changed
+- Refactored module ([#124](../../issues/124))
+
+### Fixed
+- Bug fix ([#125](../../issues/125))
+```
+
+**Notes:**
+- Groups by conventional commit type (feat, fix, refactor, perf)
+- Automatically linkifies issue references
+- Follows Keep a Changelog format
+
+---
+
+### `bobnet docs project-template`
+
+Output GitHub Project board template with standard columns.
+
+**Usage:**
+```bash
+bobnet docs project-template
+```
+
+**Output:**
+Recommended project board structure with:
+- **Not Started** — New work
+- **In Progress** — Active development
+- **Blocked** — Waiting on dependencies
+- **Review** — Ready for review
+- **Done** — Completed
+
+**Examples:**
+```bash
+# View template
+bobnet docs project-template
+
+# Save to file
+bobnet docs project-template > .github/project-template.md
+```
+
+**Includes:**
+- Status column values and descriptions
+- Setup instructions for GitHub Projects V2
+- BobNet integration examples
+- Manual status update methods
 
 ---
 
