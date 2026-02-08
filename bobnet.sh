@@ -4833,15 +4833,15 @@ EOF
         
         # Group by type
         echo "### Added"
-        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         echo "### Changed"
-        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         echo "### Fixed"
-        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
     else
         # Generate for specific version
@@ -4859,15 +4859,15 @@ EOF
         fi
         
         echo "### Added"
-        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "feat:" | sed 's/^\[.*\] //; s/^feat[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         echo "### Changed"
-        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "refactor:\|perf:" | sed 's/^\[.*\] //; s/^[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         echo "### Fixed"
-        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /'
+        git log --format="%s" "$commit_range" | grep "fix:" | sed 's/^\[.*\] //; s/^fix[^:]*: */- /' | sed 's/ #\([0-9]*\)/ ([#\1](..\/..\/issues\/\1))/'
         echo
         
         if [[ -n "$prev_tag" ]]; then
