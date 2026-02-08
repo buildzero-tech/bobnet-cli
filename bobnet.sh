@@ -3525,6 +3525,9 @@ EOF
                     ;;
             esac
             ;;
+        my-issues)
+            cmd_github_my_issues "$@"
+            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet github <command> [subcommand] [options]
@@ -3535,10 +3538,12 @@ COMMANDS:
   issue create        Create a new GitHub issue
   issue link          Link commits to issues
   milestone status    Query milestone progress
+  my-issues           Show assigned issues grouped by type
 
 EXAMPLES:
   bobnet github issue create "Feature: Add SSO" --label enhancement
   bobnet github milestone status "Q1 2026"
+  bobnet github my-issues
 
 See 'bobnet github <command> help' for more information on a specific command.
 EOF
@@ -3548,6 +3553,131 @@ EOF
             ;;
     esac
 }
+
+cmd_github_my_issues() {
+    local repo="" show_all=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            --all|-a)
+                show_all=true
+                shift
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github my-issues [options]
+
+Show GitHub issues assigned to current user, grouped by type.
+
+OPTIONS:
+  --repo, -R <owner/repo>   Filter to specific repository
+  --all, -a                 Show all issues (default: open only)
+
+OUTPUT:
+  Issues grouped by label:
+  - Epics (epic label)
+  - Features (enhancement/feature label)
+  - Documentation (documentation label)
+  - Maintenance (maintenance/chore label)
+  - Bugs (bug label)
+  - Other (no matching label)
+
+EXAMPLES:
+  bobnet github my-issues
+  bobnet github my-issues --repo buildzero-tech/bobnet-cli
+  bobnet github my-issues --all
+
+NOTES:
+  - Only shows issues assigned to current GitHub user
+  - Requires gh CLI authentication
+EOF
+                return 0
+                ;;
+            *)
+                error "Unexpected argument: $1"
+                ;;
+        esac
+    done
+    
+    # Get current user
+    local current_user=$(gh api user -q .login 2>/dev/null)
+    [[ -z "$current_user" ]] && error "Not authenticated with gh CLI"
+    
+    info "Fetching issues assigned to $current_user..."
+    
+    # Build query
+    local state_filter="is:open"
+    [[ "$show_all" == "true" ]] && state_filter=""
+    
+    local repo_filter=""
+    [[ -n "$repo" ]] && repo_filter="repo:$repo"
+    
+    # Fetch issues
+    local issues=$(gh search issues "assignee:$current_user $state_filter $repo_filter" --json number,title,labels,repository --limit 100 2>/dev/null)
+    
+    if [[ -z "$issues" ]] || [[ "$issues" == "[]" ]]; then
+        success "No issues assigned to you!"
+        return 0
+    fi
+    
+    # Group issues by type
+    local epics=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    local features=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "enhancement" or .labels[].name == "feature") | select(.labels[].name != "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    local docs=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "documentation") | select(.labels[].name != "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    local maintenance=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "maintenance" or .labels[].name == "chore") | select(.labels[].name != "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    local bugs=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "bug") | select(.labels[].name != "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    
+    # Get issues that don't match any category
+    local other=$(echo "$issues" | jq -r '.[] | select(.labels | map(.name) | contains(["epic", "enhancement", "feature", "documentation", "maintenance", "chore", "bug"]) | not) | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    
+    echo ""
+    
+    # Display grouped issues
+    if [[ -n "$epics" ]]; then
+        echo "📋 Epics:"
+        echo "$epics" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$features" ]]; then
+        echo "✨ Features:"
+        echo "$features" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$docs" ]]; then
+        echo "📚 Documentation:"
+        echo "$docs" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$maintenance" ]]; then
+        echo "🔧 Maintenance:"
+        echo "$maintenance" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$bugs" ]]; then
+        echo "🐛 Bugs:"
+        echo "$bugs" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$other" ]]; then
+        echo "📝 Other:"
+        echo "$other" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    # Count total
+    local total=$(echo "$issues" | jq 'length' 2>/dev/null)
+    success "Total: $total issue(s)"
+}
+
 
 # GitHub API helpers
 find_milestone() {
