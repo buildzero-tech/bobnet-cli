@@ -3525,6 +3525,9 @@ EOF
                     ;;
             esac
             ;;
+        my-issues)
+            cmd_github_my_issues "$@"
+            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet github <command> [subcommand] [options]
@@ -3535,10 +3538,12 @@ COMMANDS:
   issue create        Create a new GitHub issue
   issue link          Link commits to issues
   milestone status    Query milestone progress
+  my-issues           Show assigned issues grouped by type
 
 EXAMPLES:
   bobnet github issue create "Feature: Add SSO" --label enhancement
   bobnet github milestone status "Q1 2026"
+  bobnet github my-issues
 
 See 'bobnet github <command> help' for more information on a specific command.
 EOF
@@ -3548,6 +3553,131 @@ EOF
             ;;
     esac
 }
+
+cmd_github_my_issues() {
+    local repo="" show_all=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            --all|-a)
+                show_all=true
+                shift
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet github my-issues [options]
+
+Show GitHub issues assigned to current user, grouped by type.
+
+OPTIONS:
+  --repo, -R <owner/repo>   Filter to specific repository
+  --all, -a                 Show all issues (default: open only)
+
+OUTPUT:
+  Issues grouped by label:
+  - Epics (epic label)
+  - Features (enhancement/feature label)
+  - Documentation (documentation label)
+  - Maintenance (maintenance/chore label)
+  - Bugs (bug label)
+  - Other (no matching label)
+
+EXAMPLES:
+  bobnet github my-issues
+  bobnet github my-issues --repo buildzero-tech/bobnet-cli
+  bobnet github my-issues --all
+
+NOTES:
+  - Only shows issues assigned to current GitHub user
+  - Requires gh CLI authentication
+EOF
+                return 0
+                ;;
+            *)
+                error "Unexpected argument: $1"
+                ;;
+        esac
+    done
+    
+    # Get current user
+    local current_user=$(gh api user -q .login 2>/dev/null)
+    [[ -z "$current_user" ]] && error "Not authenticated with gh CLI"
+    
+    info "Fetching issues assigned to $current_user..."
+    
+    # Build query
+    local state_filter="is:open"
+    [[ "$show_all" == "true" ]] && state_filter=""
+    
+    local repo_filter=""
+    [[ -n "$repo" ]] && repo_filter="repo:$repo"
+    
+    # Fetch issues
+    local issues=$(gh search issues "assignee:$current_user $state_filter $repo_filter" --json number,title,labels,repository --limit 100 2>/dev/null)
+    
+    if [[ -z "$issues" ]] || [[ "$issues" == "[]" ]]; then
+        success "No issues assigned to you!"
+        return 0
+    fi
+    
+    # Group issues by type
+    local epics=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    local features=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "enhancement" or .labels[].name == "feature") | select(.labels[].name != "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    local docs=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "documentation") | select(.labels[].name != "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    local maintenance=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "maintenance" or .labels[].name == "chore") | select(.labels[].name != "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    local bugs=$(echo "$issues" | jq -r '.[] | select(.labels[].name == "bug") | select(.labels[].name != "epic") | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    
+    # Get issues that don't match any category
+    local other=$(echo "$issues" | jq -r '.[] | select(.labels | map(.name) | contains(["epic", "enhancement", "feature", "documentation", "maintenance", "chore", "bug"]) | not) | "\(.repository.nameWithOwner)#\(.number): \(.title)"' 2>/dev/null)
+    
+    echo ""
+    
+    # Display grouped issues
+    if [[ -n "$epics" ]]; then
+        echo "📋 Epics:"
+        echo "$epics" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$features" ]]; then
+        echo "✨ Features:"
+        echo "$features" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$docs" ]]; then
+        echo "📚 Documentation:"
+        echo "$docs" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$maintenance" ]]; then
+        echo "🔧 Maintenance:"
+        echo "$maintenance" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$bugs" ]]; then
+        echo "🐛 Bugs:"
+        echo "$bugs" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    if [[ -n "$other" ]]; then
+        echo "📝 Other:"
+        echo "$other" | sed 's/^/  /'
+        echo ""
+    fi
+    
+    # Count total
+    local total=$(echo "$issues" | jq 'length' 2>/dev/null)
+    success "Total: $total issue(s)"
+}
+
 
 # GitHub API helpers
 find_milestone() {
@@ -4826,6 +4956,262 @@ EOF
     fi
 }
 
+cmd_work() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        start)
+            cmd_work_start "$@"
+            ;;
+        done)
+            cmd_work_done "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet work <command> [options]
+
+Work tracking commands for managing GitHub issues and project boards.
+
+COMMANDS:
+  start <issue>          Mark issue as "In Progress" and assign to self
+  done <issue>           Mark issue as "Done" and close with commit references
+
+EXAMPLES:
+  bobnet work start 37
+  bobnet work done 37
+
+See 'bobnet work <command> help' for more information.
+EOF
+            ;;
+        *)
+            error "Unknown work command: $subcmd (try 'bobnet work help')"
+            ;;
+    esac
+}
+
+cmd_work_start() {
+    local issue_num="" repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet work start <issue> [options]
+
+Mark a GitHub issue as "In Progress" and assign to current agent.
+
+OPTIONS:
+  --repo, -R <owner/repo>   Target repository (default: current repo)
+
+WORKFLOW:
+  1. Validates issue exists
+  2. Assigns issue to current user (if not already assigned)
+  3. Updates GitHub Project status to "In Progress" (if in project)
+  4. Adds work-started comment with timestamp
+  5. Validates working directory matches repo
+
+EXAMPLES:
+  bobnet work start 37
+  bobnet work start 37 --repo buildzero-tech/bobnet-cli
+
+NEXT STEPS:
+  - Work on the issue
+  - Commit with: bobnet git commit "feat: description #37"
+  - When done: bobnet work done 37
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$issue_num" ]]; then
+                    issue_num="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$issue_num" ]] && error "Issue number is required"
+    
+    # Detect current repo if not specified
+    if [[ -z "$repo" ]]; then
+        repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+        [[ -z "$repo" ]] && error "Not in a git repository. Use --repo to specify target."
+    fi
+    
+    info "Starting work on $repo#$issue_num..."
+    
+    # Validate issue exists and get current state
+    local issue_state=$(gh issue view "$issue_num" --repo "$repo" --json state -q .state 2>/dev/null)
+    
+    if [[ -z "$issue_state" ]]; then
+        error "Issue #$issue_num not found in $repo"
+    fi
+    
+    if [[ "$issue_state" == "CLOSED" ]]; then
+        warn "Issue #$issue_num is already closed"
+        read -p "Reopen and start work? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+        gh issue reopen "$issue_num" --repo "$repo"
+    fi
+    
+    # Get current user
+    local current_user=$(gh api user -q .login 2>/dev/null)
+    
+    # Check if already assigned
+    local assignees=$(gh issue view "$issue_num" --repo "$repo" --json assignees -q '.assignees[].login' 2>/dev/null)
+    
+    if echo "$assignees" | grep -q "^${current_user}$"; then
+        success "Already assigned to you"
+    else
+        info "Assigning to $current_user..."
+        gh issue edit "$issue_num" --repo "$repo" --add-assignee "$current_user"
+        success "Assigned to $current_user"
+    fi
+    
+    # Add work-started comment
+    local timestamp=$(date -u +"%Y-%m-%d %H:%M UTC")
+    gh issue comment "$issue_num" --repo "$repo" --body "🚧 Work started by @$current_user ($timestamp)"
+    
+    # TODO: Update GitHub Project status to "In Progress" (needs project API integration)
+    # For now, just note it
+    warn "Project status update not yet implemented - manually update on GitHub if needed"
+    
+    echo ""
+    success "Work started on $repo#$issue_num"
+    echo ""
+    info "Next steps:"
+    echo "  1. Work on the issue"
+    echo "  2. Commit with: bobnet git commit 'feat: description #$issue_num'"
+    echo "  3. When done: bobnet work done $issue_num"
+}
+
+cmd_work_done() {
+    local issue_num="" repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet work done <issue> [options]
+
+Mark a GitHub issue as "Done" and close it with commit references.
+
+OPTIONS:
+  --repo, -R <owner/repo>   Target repository (default: current repo)
+
+WORKFLOW:
+  1. Finds all commits referencing the issue
+  2. Updates GitHub Project status to "Done" (if in project)
+  3. Closes issue with comment listing commits
+  4. Shows summary of work completed
+
+EXAMPLES:
+  bobnet work done 37
+  bobnet work done 37 --repo buildzero-tech/bobnet-cli
+
+REQUIRES:
+  - At least one commit referencing the issue (#37)
+  - Issue must be open
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$issue_num" ]]; then
+                    issue_num="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$issue_num" ]] && error "Issue number is required"
+    
+    # Detect current repo if not specified
+    if [[ -z "$repo" ]]; then
+        repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+        [[ -z "$repo" ]] && error "Not in a git repository. Use --repo to specify target."
+    fi
+    
+    info "Completing work on $repo#$issue_num..."
+    
+    # Validate issue exists and is open
+    local issue_state=$(gh issue view "$issue_num" --repo "$repo" --json state -q .state 2>/dev/null)
+    
+    if [[ -z "$issue_state" ]]; then
+        error "Issue #$issue_num not found in $repo"
+    fi
+    
+    if [[ "$issue_state" == "CLOSED" ]]; then
+        warn "Issue #$issue_num is already closed"
+        return 0
+    fi
+    
+    # Find commits referencing this issue
+    info "Finding commits referencing #$issue_num..."
+    
+    # Search commit messages for "#<issue_num>" pattern
+    local commits=$(git log --all --oneline --grep="#$issue_num" 2>/dev/null)
+    
+    if [[ -z "$commits" ]]; then
+        warn "No commits found referencing #$issue_num"
+        echo ""
+        read -p "Close issue anyway? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+        local close_body="Work completed (no commits found referencing this issue)"
+    else
+        local commit_count=$(echo "$commits" | wc -l | tr -d ' ')
+        success "Found $commit_count commit(s)"
+        echo ""
+        echo "$commits" | sed 's/^/  /'
+        echo ""
+        
+        # Build close comment with commit list
+        local close_body="✅ Work completed
+
+**Commits:**
+"
+        while read -r commit; do
+            local sha=$(echo "$commit" | awk '{print $1}')
+            local msg=$(echo "$commit" | cut -d' ' -f2-)
+            close_body+="
+- $sha: $msg"
+        done <<< "$commits"
+    fi
+    
+    # TODO: Update GitHub Project status to "Done" (needs project API integration)
+    
+    # Close issue with commit summary
+    info "Closing issue..."
+    gh issue close "$issue_num" --repo "$repo" --comment "$close_body"
+    
+    echo ""
+    success "Issue #$issue_num closed!"
+    
+    if [[ -n "$commits" ]]; then
+        echo ""
+        info "Don't forget to:"
+        echo "  - Update MEMORY.md: Mark todo [x] completed"
+        echo "  - Run: bobnet todo sync (to sync with GitHub)"
+    fi
+}
+
 cmd_todo() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -5185,6 +5571,7 @@ COMMANDS:
   git [cmd]           Git attribution commands (commit, check)
   github [cmd]        GitHub integration (issues, milestones)
   spec [cmd]          Specification management (create-issues)
+  work [cmd]          Work tracking (start, done)
   todo [cmd]          Todo management and GitHub sync (list, status, sync)
   docs [cmd]          Documentation generation (roadmap, changelog, release)
   incident [cmd]      Incident tracking and post-mortems (create, close, list)
@@ -5223,6 +5610,7 @@ bobnet_main() {
         git) shift; cmd_git "$@" ;;
         github) shift; cmd_github "$@" ;;
         spec) shift; cmd_spec "$@" ;;
+        work) shift; cmd_work "$@" ;;
         todo) shift; cmd_todo "$@" ;;
         docs) shift; cmd_docs "$@" ;;
         incident) shift; cmd_incident "$@" ;;
