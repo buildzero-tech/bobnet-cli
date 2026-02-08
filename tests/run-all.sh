@@ -37,6 +37,7 @@ TEST_SCRIPTS=(
     "test-spec-workflow.sh"
     "test-label-discovery.sh"
     "test-deduplication.sh"
+    "test-release-docs.sh"
 )
 
 # Track results
