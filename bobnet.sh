@@ -8,10 +8,11 @@ CONFIG_DIR="$HOME/.openclaw"
 CONFIG_NAME="openclaw.json"
 CLI_NAME="openclaw"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 error() { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
 warn() { echo -e "${YELLOW}warn:${NC} $*" >&2; }
 success() { echo -e "${GREEN}✓${NC} $*"; }
+info() { echo -e "${BLUE}→${NC} $*"; }
 
 
 # Symlink ~/.openclaw/agents → BobNet agents directory
@@ -3548,6 +3549,76 @@ EOF
     esac
 }
 
+# Parse spec file for key fields
+parse_spec_file() {
+    local spec_file="$1"
+    local field="$2"
+    
+    case "$field" in
+        context)
+            grep -m1 "^\*\*Context:\*\*" "$spec_file" | sed 's/^\*\*Context:\*\* *//'
+            ;;
+        milestone)
+            # Try both formats: "**GitHub Milestone:**" and "- **Milestone:**"
+            local ms=$(grep -m1 "^\*\*GitHub Milestone:\*\*" "$spec_file" | sed 's/^\*\*GitHub Milestone:\*\* *//')
+            [[ -z "$ms" ]] && ms=$(grep -m1 "^- \*\*Milestone:\*\*" "$spec_file" | sed 's/^- \*\*Milestone:\*\* *//')
+            echo "$ms"
+            ;;
+        primary-repo)
+            grep -m1 "^\*\*Primary Repository:\*\*" "$spec_file" | sed 's/^\*\*Primary Repository:\*\* *//'
+            ;;
+        additional-repos)
+            grep -m1 "^\*\*Additional Repos:\*\*" "$spec_file" | sed 's/^\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//'
+            ;;
+    esac
+}
+
+# Extract all Epic sections from spec
+extract_epics() {
+    local spec_file="$1"
+    grep -n "^### Epic:" "$spec_file" | sed 's/:### Epic: /|/'
+}
+
+# Extract Epic details (repo, status, dependencies)
+parse_epic_section() {
+    local spec_file="$1"
+    local start_line="$2"
+    local field="$3"
+    
+    local epic_section=$(awk -v start="$start_line" 'NR >= start && /^### Epic:/ && NR > start { exit } NR >= start && /^## [A-Z]/ && !/^###/ { exit } NR >= start' "$spec_file")
+    
+    case "$field" in
+        repository)
+            echo "$epic_section" | grep -m1 "^\*\*Primary Repository:\*\*" | sed 's/^\*\*Primary Repository:\*\* *//'
+            ;;
+        status)
+            echo "$epic_section" | grep -m1 "^\*\*Status:\*\*" | sed 's/^\*\*Status:\*\* *//'
+            ;;
+        dependencies)
+            echo "$epic_section" | grep -m1 "^\*\*Dependencies:\*\*" | sed 's/^\*\*Dependencies:\*\* *//'
+            ;;
+    esac
+}
+
+# Extract work items from Epic section
+extract_work_items() {
+    local spec_file="$1"
+    local start_line="$2"
+    
+    awk -v start="$start_line" '
+        NR >= start && /^### Epic:/ && NR > start { exit }
+        NR >= start && /^## [A-Z]/ && !/^###/ { exit }
+        NR >= start && /^####/ { category=$0; sub(/^#### /, "", category); sub(/ \(.*/, "", category); next }
+        NR >= start && /^- / { 
+            item=$0
+            sub(/^- /, "", item)
+            sub(/ #[0-9]+$/, "", item)
+            sub(/ [a-z-]+\/[a-z-]+#[0-9]+$/, "", item)
+            print category "|" item
+        }
+    ' "$spec_file"
+}
+
 cmd_spec() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -3651,8 +3722,55 @@ EOF
     
     info "Parsing spec file: $spec_file"
     
-    # TODO: Implement spec parsing and issue creation
-    error "Command not yet implemented (issue #36)"
+    # Parse spec metadata
+    local context=$(parse_spec_file "$spec_file" context)
+    local spec_milestone=$(parse_spec_file "$spec_file" milestone)
+    local primary_repo=$(parse_spec_file "$spec_file" primary-repo)
+    local additional_repos=$(parse_spec_file "$spec_file" additional-repos)
+    
+    # Override milestone if provided
+    [[ -n "$milestone" ]] && spec_milestone="$milestone"
+    
+    # Validate required fields
+    [[ -z "$context" ]] && error "Spec missing **Context:** field"
+    [[ -z "$spec_milestone" ]] && error "Spec missing **GitHub Milestone:** field"
+    [[ -z "$primary_repo" ]] && error "Spec missing **Primary Repository:** field"
+    
+    info "Context: $context"
+    info "Milestone: $spec_milestone"
+    info "Primary Repository: $primary_repo"
+    [[ -n "$additional_repos" ]] && info "Additional Repos: $additional_repos"
+    
+    # Extract Epics
+    local epics=$(extract_epics "$spec_file")
+    local epic_count=$(echo "$epics" | wc -l | tr -d ' ')
+    
+    [[ -z "$epics" ]] && error "No Epics found in spec (looking for '### Epic:' headers)"
+    
+    info "Found $epic_count Epic(s)"
+    echo ""
+    
+    # Show Epic summary
+    while IFS='|' read -r line_num epic_title; do
+        info "  Epic: $epic_title"
+        local epic_repo=$(parse_epic_section "$spec_file" "$line_num" repository)
+        [[ -n "$epic_repo" ]] && echo "    Repository: $epic_repo"
+        
+        local work_items=$(extract_work_items "$spec_file" "$line_num")
+        local item_count=$(echo "$work_items" | wc -l | tr -d ' ')
+        echo "    Work items: $item_count"
+    done <<< "$epics"
+    
+    echo ""
+    info "Spec parsing complete"
+    
+    if [[ "$dry_run" == "true" ]]; then
+        success "Dry run complete (no issues created)"
+        return 0
+    fi
+    
+    # TODO: Implement issue creation in next commit
+    error "Issue creation not yet implemented (coming in next commit)"
 }
 
 cmd_github_issue_create() {
