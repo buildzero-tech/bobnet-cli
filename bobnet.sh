@@ -4725,6 +4725,9 @@ cmd_docs() {
         release)
             cmd_docs_release "$@"
             ;;
+        release-notes)
+            cmd_docs_release_notes "$@"
+            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet docs <command> [options]
@@ -4734,12 +4737,14 @@ Documentation generation from git and GitHub data.
 COMMANDS:
   roadmap                 Generate ROADMAP.md from GitHub milestones
   changelog [version]     Generate CHANGELOG.md from commits
-  release <version>       Generate release notes
+  release <version>       Generate release notes (commit-based)
+  release-notes [tag]     Generate release notes from GitHub issues
 
 EXAMPLES:
   bobnet docs roadmap
   bobnet docs changelog
   bobnet docs release v1.5.0
+  bobnet docs release-notes v1.5.0
 
 See 'bobnet docs <command> help' for more information.
 EOF
@@ -5210,6 +5215,143 @@ EOF
         echo "  - Update MEMORY.md: Mark todo [x] completed"
         echo "  - Run: bobnet todo sync (to sync with GitHub)"
     fi
+}
+
+cmd_docs_release_notes() {
+    local since_tag="${1:-}"
+    local repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet docs release-notes [tag] [options]
+
+Generate release notes from GitHub issues closed since a tag.
+
+Groups issues by label:
+- Features (enhancement/feature label)
+- Documentation (documentation label)
+- Maintenance (maintenance/chore label)
+- Bug Fixes (bug label)
+
+OPTIONS:
+  tag               Tag to generate notes since (default: latest tag)
+  --repo, -R <repo> Target repository (default: current repo)
+
+OUTPUT:
+  Markdown-formatted release notes grouped by category
+
+EXAMPLES:
+  bobnet docs release-notes v1.4.0
+  bobnet docs release-notes v1.4.0 --repo buildzero-tech/bobnet-cli
+  bobnet docs release-notes > releases/v1.5.0.md
+
+FORMAT:
+  # Release Notes
+
+  ## Features
+  - Feature A (#123)
+  - Feature B (#124)
+
+  ## Documentation
+  - Updated docs (#125)
+
+See: https://keepachangelog.com
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$since_tag" ]]; then
+                    since_tag="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    # Detect current repo if not specified
+    if [[ -z "$repo" ]]; then
+        repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+        [[ -z "$repo" ]] && error "Not in a git repository. Use --repo to specify target."
+    fi
+    
+    # Get latest tag if not specified
+    if [[ -z "$since_tag" ]]; then
+        since_tag=$(git describe --tags --abbrev=0 2>/dev/null)
+        [[ -z "$since_tag" ]] && error "No tags found. Specify a tag to generate notes since."
+    fi
+    
+    # Get tag date
+    local tag_date=$(git log -1 --format=%aI "$since_tag" 2>/dev/null)
+    [[ -z "$tag_date" ]] && error "Tag not found: $since_tag"
+    
+    info "Generating release notes since $since_tag ($tag_date)..."
+    
+    # Query closed issues since tag date
+    local issues=$(gh issue list \
+        --repo "$repo" \
+        --state closed \
+        --limit 500 \
+        --json number,title,labels,closedAt \
+        --jq ".[] | select(.closedAt >= \"$tag_date\")" 2>/dev/null)
+    
+    if [[ -z "$issues" ]] || [[ "$issues" == "[]" ]]; then
+        warn "No closed issues found since $since_tag"
+        return 0
+    fi
+    
+    # Group issues by label
+    local features=$(echo "$issues" | jq -r 'select(.labels[].name == "enhancement" or .labels[].name == "feature") | "- \(.title) (#\(.number))"' 2>/dev/null)
+    local docs=$(echo "$issues" | jq -r 'select(.labels[].name == "documentation") | "- \(.title) (#\(.number))"' 2>/dev/null)
+    local maintenance=$(echo "$issues" | jq -r 'select(.labels[].name == "maintenance" or .labels[].name == "chore") | "- \(.title) (#\(.number))"' 2>/dev/null)
+    local bugs=$(echo "$issues" | jq -r 'select(.labels[].name == "bug") | "- \(.title) (#\(.number))"' 2>/dev/null)
+    
+    # Output release notes
+    echo "# Release Notes"
+    echo ""
+    echo "**Since:** $since_tag"
+    echo ""
+    
+    if [[ -n "$features" ]]; then
+        echo "## ✨ Features"
+        echo ""
+        echo "$features"
+        echo ""
+    fi
+    
+    if [[ -n "$docs" ]]; then
+        echo "## 📚 Documentation"
+        echo ""
+        echo "$docs"
+        echo ""
+    fi
+    
+    if [[ -n "$maintenance" ]]; then
+        echo "## 🔧 Maintenance"
+        echo ""
+        echo "$maintenance"
+        echo ""
+    fi
+    
+    if [[ -n "$bugs" ]]; then
+        echo "## 🐛 Bug Fixes"
+        echo ""
+        echo "$bugs"
+        echo ""
+    fi
+    
+    # Count total
+    local total=$(echo "$issues" | jq 'length' 2>/dev/null)
+    echo "---"
+    echo ""
+    echo "**Total:** $total issue(s) closed"
 }
 
 cmd_todo() {
