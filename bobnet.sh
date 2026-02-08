@@ -8,10 +8,11 @@ CONFIG_DIR="$HOME/.openclaw"
 CONFIG_NAME="openclaw.json"
 CLI_NAME="openclaw"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 error() { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
 warn() { echo -e "${YELLOW}warn:${NC} $*" >&2; }
 success() { echo -e "${GREEN}✓${NC} $*"; }
+info() { echo -e "${BLUE}→${NC} $*"; }
 
 
 # Symlink ~/.openclaw/agents → BobNet agents directory
@@ -3548,6 +3549,530 @@ EOF
     esac
 }
 
+# GitHub API helpers
+find_milestone() {
+    local repo="$1"
+    local milestone_name="$2"
+    gh api "repos/$repo/milestones" --jq ".[] | select(.title == \"$milestone_name\") | .number" 2>/dev/null | head -1
+}
+
+ensure_milestone() {
+    local repo="$1"
+    local milestone_name="$2"
+    local description="$3"
+    
+    local existing=$(find_milestone "$repo" "$milestone_name")
+    if [[ -n "$existing" ]]; then
+        echo "$existing"
+        return 0
+    fi
+    
+    local result=$(gh api -X POST "repos/$repo/milestones" \
+        -f title="$milestone_name" \
+        -f description="$description" \
+        --jq '.number' 2>/dev/null)
+    echo "$result"
+}
+
+get_repo_labels() {
+    local repo="$1"
+    gh api "repos/$repo/labels" --jq '.[].name' 2>/dev/null
+}
+
+map_type_to_label() {
+    local type="$1"
+    local labels="$2"
+    
+    case "$type" in
+        Features*|feat*)
+            echo "$labels" | grep -i "^enhancement$\|^feature$" | head -1
+            ;;
+        Documentation*|docs*)
+            echo "$labels" | grep -i "^documentation$" | head -1
+            ;;
+        Testing*|test*)
+            echo "$labels" | grep -i "^testing$" | head -1
+            ;;
+        Maintenance*|chore*)
+            echo "$labels" | grep -i "^maintenance$\|^chore$" | head -1
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+ensure_label() {
+    local repo="$1"
+    local label_name="$2"
+    local color="${3:-fbca04}"
+    local description="${4:-}"
+    
+    gh api "repos/$repo/labels/$label_name" >/dev/null 2>&1 && return 0
+    gh api -X POST "repos/$repo/labels" \
+        -f name="$label_name" \
+        -f color="$color" \
+        -f description="$description" >/dev/null 2>&1
+}
+
+# Create Epic issue
+create_epic_issue() {
+    local repo="$1"
+    local title="$2"
+    local milestone="$3"
+    local body="$4"
+    
+    local issue_url=$(gh issue create \
+        --repo "$repo" \
+        --title "$title" \
+        --label "epic" \
+        --milestone "$milestone" \
+        --body "$body" 2>&1)
+    
+    # Extract issue number from URL
+    echo "$issue_url" | grep -o '[0-9]*$'
+}
+
+# Create work item issue
+create_work_item() {
+    local repo="$1"
+    local title="$2"
+    local label="$3"
+    local milestone="$4"
+    local epic_number="$5"
+    local epic_repo="$6"
+    
+    local body="Part of Epic "
+    if [[ "$repo" == "$epic_repo" ]]; then
+        body+="#${epic_number}"
+    else
+        body+="${epic_repo}#${epic_number}"
+    fi
+    
+    local issue_url=$(gh issue create \
+        --repo "$repo" \
+        --title "$title" \
+        --label "$label" \
+        --milestone "$milestone" \
+        --body "$body" 2>&1)
+    
+    echo "$issue_url" | grep -o '[0-9]*$'
+}
+
+# Parse spec file for key fields
+parse_spec_file() {
+    local spec_file="$1"
+    local field="$2"
+    
+    case "$field" in
+        context)
+            grep -m1 "^\*\*Context:\*\*" "$spec_file" | sed 's/^\*\*Context:\*\* *//'
+            ;;
+        milestone)
+            # Try both formats: "**GitHub Milestone:**" and "- **Milestone:**"
+            local ms=$(grep -m1 "^\*\*GitHub Milestone:\*\*" "$spec_file" | sed 's/^\*\*GitHub Milestone:\*\* *//')
+            [[ -z "$ms" ]] && ms=$(grep -m1 "^- \*\*Milestone:\*\*" "$spec_file" | sed 's/^- \*\*Milestone:\*\* *//')
+            echo "$ms"
+            ;;
+        primary-repo)
+            # Look in "This Spec's Context" section first
+            local repo=$(awk '/^## This Spec/{flag=1; next} /^##/{flag=0} flag' "$spec_file" | grep -m1 "\*\*Primary Repository:\*\*" | sed 's/.*\*\*Primary Repository:\*\* *//')
+            # Fallback to top-level if not found
+            [[ -z "$repo" ]] && repo=$(grep -m1 "^\*\*Primary Repository:\*\*" "$spec_file" | sed 's/^\*\*Primary Repository:\*\* *//')
+            echo "$repo"
+            ;;
+        additional-repos)
+            # Look in "This Spec's Context" section first
+            local repos=$(awk '/^## This Spec/{flag=1; next} /^##/{flag=0} flag' "$spec_file" | grep -m1 "\*\*Additional Repos:\*\*" | sed 's/.*\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//')
+            # Fallback to top-level if not found
+            [[ -z "$repos" ]] && repos=$(grep -m1 "^\*\*Additional Repos:\*\*" "$spec_file" | sed 's/^\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//')
+            echo "$repos"
+            ;;
+    esac
+}
+
+# Extract all Epic sections from spec
+extract_epics() {
+    local spec_file="$1"
+    grep -n "^### Epic:" "$spec_file" | sed 's/:### Epic: /|/'
+}
+
+# Extract Epic details (repo, status, dependencies)
+parse_epic_section() {
+    local spec_file="$1"
+    local start_line="$2"
+    local field="$3"
+    
+    local epic_section=$(awk -v start="$start_line" 'NR >= start && /^### Epic:/ && NR > start { exit } NR >= start && /^## [A-Z]/ && !/^###/ { exit } NR >= start' "$spec_file")
+    
+    case "$field" in
+        repository)
+            echo "$epic_section" | grep -m1 "^\*\*Primary Repository:\*\*" | sed 's/^\*\*Primary Repository:\*\* *//'
+            ;;
+        status)
+            echo "$epic_section" | grep -m1 "^\*\*Status:\*\*" | sed 's/^\*\*Status:\*\* *//'
+            ;;
+        dependencies)
+            echo "$epic_section" | grep -m1 "^\*\*Dependencies:\*\*" | sed 's/^\*\*Dependencies:\*\* *//'
+            ;;
+    esac
+}
+
+# Extract work items from Epic section
+extract_work_items() {
+    local spec_file="$1"
+    local start_line="$2"
+    
+    awk -v start="$start_line" '
+        NR >= start && /^### Epic:/ && NR > start { exit }
+        NR >= start && /^## [A-Z]/ && !/^###/ { exit }
+        NR >= start && /^####/ { category=$0; sub(/^#### /, "", category); sub(/ \(.*/, "", category); next }
+        NR >= start && /^- / { 
+            item=$0
+            sub(/^- /, "", item)
+            sub(/ #[0-9]+$/, "", item)
+            sub(/ [a-z-]+\/[a-z-]+#[0-9]+$/, "", item)
+            print category "|" item
+        }
+    ' "$spec_file"
+}
+
+cmd_spec() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        create-issues)
+            cmd_spec_create_issues "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet spec <command> [options]
+
+Specification management and GitHub issue generation.
+
+COMMANDS:
+  create-issues <file>    Create GitHub issues from spec file
+
+EXAMPLES:
+  bobnet spec create-issues docs/FEATURE-SPEC.md
+  bobnet spec create-issues docs/FEATURE-SPEC.md --project "BobNet Work"
+
+See 'bobnet spec <command> help' for more information.
+EOF
+            ;;
+        *)
+            error "Unknown spec command: $subcmd (try 'bobnet spec help')"
+            ;;
+    esac
+}
+
+cmd_spec_create_issues() {
+    local spec_file="" project="" milestone="" dry_run=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project|-p)
+                project="$2"
+                shift 2
+                ;;
+            --milestone|-m)
+                milestone="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet spec create-issues <file> [options]
+
+Create GitHub issues from a specification file.
+
+Parses the spec for context, Epics, and work items, then creates:
+- Milestone (if doesn't exist)
+- Epic parent issues with 'epic' label
+- Work item issues under Epics
+- Updates spec file with issue numbers
+
+OPTIONS:
+  --project, -p <name>     GitHub Project name (optional)
+  --milestone, -m <name>   Milestone name (overrides spec)
+  --dry-run                Show what would be created without creating
+
+WORKFLOW:
+  1. Parse spec file for context, Epics, work items
+  2. Search for existing milestones/Epics (deduplication)
+  3. Show proposed issue structure
+  4. Wait for user approval
+  5. Discover repo labels and map conventional types
+  6. Create Epic issues + work items
+  7. Update spec file with issue numbers
+
+EXAMPLES:
+  bobnet spec create-issues docs/TODO-FEATURE-SPEC.md
+  bobnet spec create-issues docs/EMAIL-SECURITY.md --project "BobNet Work"
+  bobnet spec create-issues docs/FEATURE.md --dry-run
+
+SPEC FILE REQUIREMENTS:
+  - Must have "Context:" field (BobNet Infrastructure, Monorepo Package, etc.)
+  - Must have "GitHub Milestone:" field
+  - Must have "### Epic:" sections with work items
+
+See docs/GITHUB-TRACKING-ENFORCEMENT.md for spec format details.
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$spec_file" ]]; then
+                    spec_file="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$spec_file" ]] && error "Spec file is required"
+    [[ ! -f "$spec_file" ]] && error "Spec file not found: $spec_file"
+    
+    info "Parsing spec file: $spec_file"
+    
+    # Parse spec metadata
+    local context=$(parse_spec_file "$spec_file" context)
+    local spec_milestone=$(parse_spec_file "$spec_file" milestone)
+    local primary_repo=$(parse_spec_file "$spec_file" primary-repo)
+    local additional_repos=$(parse_spec_file "$spec_file" additional-repos)
+    
+    # Override milestone if provided
+    [[ -n "$milestone" ]] && spec_milestone="$milestone"
+    
+    # Validate required fields
+    [[ -z "$context" ]] && error "Spec missing **Context:** field"
+    [[ -z "$spec_milestone" ]] && error "Spec missing **GitHub Milestone:** field"
+    [[ -z "$primary_repo" ]] && error "Spec missing **Primary Repository:** field"
+    
+    info "Context: $context"
+    info "Milestone: $spec_milestone"
+    info "Primary Repository: $primary_repo"
+    [[ -n "$additional_repos" ]] && info "Additional Repos: $additional_repos"
+    
+    # Extract Epics
+    local epics=$(extract_epics "$spec_file")
+    local epic_count=$(echo "$epics" | wc -l | tr -d ' ')
+    
+    [[ -z "$epics" ]] && error "No Epics found in spec (looking for '### Epic:' headers)"
+    
+    info "Found $epic_count Epic(s)"
+    echo ""
+    
+    # Show Epic summary
+    while IFS='|' read -r line_num epic_title; do
+        info "  Epic: $epic_title"
+        local epic_repo=$(parse_epic_section "$spec_file" "$line_num" repository)
+        [[ -n "$epic_repo" ]] && echo "    Repository: $epic_repo"
+        
+        local work_items=$(extract_work_items "$spec_file" "$line_num")
+        local item_count=$(echo "$work_items" | wc -l | tr -d ' ')
+        echo "    Work items: $item_count"
+    done <<< "$epics"
+    
+    echo ""
+    info "Spec parsing complete"
+    
+    if [[ "$dry_run" == "true" ]]; then
+        success "Dry run complete (no issues created)"
+        return 0
+    fi
+    
+    # Ensure milestone exists in primary repo
+    info "Checking milestone in $primary_repo..."
+    local milestone_num=$(ensure_milestone "$primary_repo" "$spec_milestone" "Enforcement system guaranteeing all significant agent work is tracked in GitHub.")
+    
+    if [[ -z "$milestone_num" ]]; then
+        error "Failed to create/find milestone: $spec_milestone"
+    fi
+    
+    success "Milestone: $spec_milestone (#$milestone_num)"
+    
+    # Discover labels in primary repo
+    info "Discovering labels in $primary_repo..."
+    local repo_labels=$(get_repo_labels "$primary_repo")
+    
+    # Ensure required labels exist
+    ensure_label "$primary_repo" "epic" "5319e7" "Parent tracking issue for a phase or feature group"
+    ensure_label "$primary_repo" "enhancement" "a2eeef" "New feature or request"
+    ensure_label "$primary_repo" "documentation" "0075ca" "Improvements or additions to documentation"
+    ensure_label "$primary_repo" "testing" "1d76db" "Testing infrastructure and test cases"
+    ensure_label "$primary_repo" "maintenance" "fbca04" "Maintenance and tooling"
+    
+    # Refresh label list after ensuring
+    repo_labels=$(get_repo_labels "$primary_repo")
+    success "Labels ready"
+    
+    echo ""
+    info "Ready to create issues"
+    echo ""
+    echo "This will create:"
+    echo "  - $epic_count Epic parent issue(s)"
+    echo "  - Work item issues under each Epic"
+    echo "  - All linked to milestone: $spec_milestone"
+    echo ""
+    read -p "Proceed with issue creation? [y/N] " -r
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        warn "Cancelled by user"
+        return 1
+    fi
+    
+    echo ""
+    info "Creating issues..."
+    
+    # Track created issues for spec file update
+    declare -a epic_updates=()
+    declare -a item_updates=()
+    
+    # Create Epics and work items
+    while IFS='|' read -r line_num epic_title; do
+        local epic_repo=$(parse_epic_section "$spec_file" "$line_num" repository)
+        [[ -z "$epic_repo" ]] && epic_repo="$primary_repo"
+        
+        # Ensure milestone exists in Epic's repo (might be different from primary)
+        if [[ "$epic_repo" != "$primary_repo" ]]; then
+            local epic_milestone_num=$(ensure_milestone "$epic_repo" "$spec_milestone" "")
+            # Also ensure labels in this repo
+            ensure_label "$epic_repo" "epic" "5319e7" "Parent tracking issue for a phase or feature group"
+        fi
+        
+        # Clean Epic title (remove emoji)
+        local clean_epic_title=$(echo "$epic_title" | sed 's/ 📋$//')
+        
+        # Create Epic issue body
+        local epic_body="Parent tracking issue for $clean_epic_title phase.
+
+**Spec:** $(basename "$spec_file")
+
+**Work Items:** See child issues"
+        
+        info "Creating Epic: $clean_epic_title ($epic_repo)"
+        local epic_number=$(create_epic_issue "$epic_repo" "Epic: $clean_epic_title" "$spec_milestone" "$epic_body")
+        
+        if [[ -z "$epic_number" ]]; then
+            error "Failed to create Epic issue: $clean_epic_title"
+        fi
+        
+        success "  Created Epic $epic_repo#$epic_number"
+        epic_updates+=("$line_num|$epic_repo|$epic_number")
+        
+        # Extract and create work items for this Epic
+        local work_items=$(extract_work_items "$spec_file" "$line_num")
+        
+        while IFS='|' read -r category item_title; do
+            [[ -z "$item_title" ]] && continue
+            
+            # Determine repo for this work item (check if it has repo prefix)
+            local item_repo="$epic_repo"
+            if [[ "$item_title" =~ ^.*\ ([a-z-]+/[a-z-]+)#[0-9]+$ ]]; then
+                # Already has issue number, skip
+                continue
+            elif [[ "$item_title" =~ ^.*\ (buildzero-tech/[a-z-]+)$ ]]; then
+                # Has repo suffix (e.g., "item buildzero-tech/ultima-thule")
+                item_repo=$(echo "$item_title" | grep -o 'buildzero-tech/[a-z-]*$')
+                item_title=$(echo "$item_title" | sed 's/ buildzero-tech\/[a-z-]*$//')
+            fi
+            
+            # Ensure milestone/labels in item repo if different
+            if [[ "$item_repo" != "$primary_repo" && "$item_repo" != "$epic_repo" ]]; then
+                ensure_milestone "$item_repo" "$spec_milestone" ""
+                ensure_label "$item_repo" "enhancement" "a2eeef" ""
+                ensure_label "$item_repo" "documentation" "0075ca" ""
+                ensure_label "$item_repo" "testing" "1d76db" ""
+                ensure_label "$item_repo" "maintenance" "fbca04" ""
+            fi
+            
+            # Map category to label
+            local item_label=$(map_type_to_label "$category" "$repo_labels")
+            [[ -z "$item_label" ]] && item_label="enhancement"
+            
+            # Create work item
+            local item_number=$(create_work_item "$item_repo" "$item_title" "$item_label" "$spec_milestone" "$epic_number" "$epic_repo")
+            
+            if [[ -z "$item_number" ]]; then
+                warn "  Failed to create work item: $item_title"
+                continue
+            fi
+            
+            echo "  → Created $item_repo#$item_number: $item_title"
+            item_updates+=("$line_num|$category|$item_title|$item_repo|$item_number")
+        done <<< "$work_items"
+        
+        echo ""
+    done <<< "$epics"
+    
+    success "All issues created!"
+    echo ""
+    info "Updating spec file with issue numbers..."
+    
+    # Create temp file for updates
+    local temp_spec=$(mktemp)
+    cp "$spec_file" "$temp_spec"
+    
+    # Update Epic issue numbers
+    for update in "${epic_updates[@]}"; do
+        IFS='|' read -r line_num repo issue_num <<< "$update"
+        
+        # Find the "**Epic Issue:**" line (usually line_num + 2)
+        local search_start=$((line_num))
+        local search_end=$((line_num + 10))
+        
+        # Update the Epic Issue line
+        awk -v start="$search_start" -v end="$search_end" -v repo="$repo" -v num="$issue_num" '
+            NR >= start && NR <= end && /\*\*Epic Issue:\*\*/ {
+                sub(/\*\*Epic Issue:\*\* .*/, "**Epic Issue:** #" num)
+            }
+            { print }
+        ' "$temp_spec" > "${temp_spec}.tmp" && mv "${temp_spec}.tmp" "$temp_spec"
+    done
+    
+    # Update work item issue numbers
+    for update in "${item_updates[@]}"; do
+        IFS='|' read -r epic_line category item_title repo issue_num <<< "$update"
+        
+        # Escape special regex characters in title
+        local escaped_title=$(echo "$item_title" | sed 's/[][\/.^$*]/\\&/g')
+        
+        # Find and update the work item line
+        # Add issue number if not already present
+        local issue_ref
+        if [[ "$repo" == "$primary_repo" ]]; then
+            issue_ref=" #$issue_num"
+        else
+            issue_ref=" $repo#$issue_num"
+        fi
+        
+        awk -v title="$escaped_title" -v ref="$issue_ref" '
+            $0 ~ title && /^- / && !/( #[0-9]+| [a-z-]+\/[a-z-]+#[0-9]+)$/ {
+                print $0 ref
+                next
+            }
+            { print }
+        ' "$temp_spec" > "${temp_spec}.tmp" && mv "${temp_spec}.tmp" "$temp_spec"
+    done
+    
+    # Replace original spec file
+    mv "$temp_spec" "$spec_file"
+    success "Spec file updated with issue numbers"
+    
+    echo ""
+    success "Issue creation complete!"
+    echo ""
+    info "Next steps:"
+    echo "  1. Review the updated spec file: $spec_file"
+    echo "  2. Commit the changes: git add $spec_file && git commit -m 'docs(spec): add GitHub issue references'"
+    echo "  3. Start implementation: bobnet work start <issue-number>"
+}
+
 cmd_github_issue_create() {
     # Parse arguments
     local title="" body="" labels=() assignees=() milestone="" repo=""
@@ -4659,6 +5184,7 @@ COMMANDS:
   search [pattern]    Search session transcripts (grep)
   git [cmd]           Git attribution commands (commit, check)
   github [cmd]        GitHub integration (issues, milestones)
+  spec [cmd]          Specification management (create-issues)
   todo [cmd]          Todo management and GitHub sync (list, status, sync)
   docs [cmd]          Documentation generation (roadmap, changelog, release)
   incident [cmd]      Incident tracking and post-mortems (create, close, list)
@@ -4696,6 +5222,7 @@ bobnet_main() {
         search) shift; cmd_search "$@" ;;
         git) shift; cmd_git "$@" ;;
         github) shift; cmd_github "$@" ;;
+        spec) shift; cmd_spec "$@" ;;
         todo) shift; cmd_todo "$@" ;;
         docs) shift; cmd_docs "$@" ;;
         incident) shift; cmd_incident "$@" ;;
