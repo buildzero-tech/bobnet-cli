@@ -34,3 +34,26 @@ jobs:
         
       - name: Check bobnet.sh syntax
         run: bash -n bobnet.sh
+        
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          
+      - name: Install BobNet CLI
+        run: |
+          mkdir -p ~/.local/bin ~/.local/lib/bobnet
+          cp bobnet.sh ~/.local/lib/bobnet/bobnet.sh
+          echo "#!/usr/bin/env bash" > ~/.local/bin/bobnet
+          echo "exec bash ~/.local/lib/bobnet/bobnet.sh \"\$@\"" >> ~/.local/bin/bobnet
+          chmod +x ~/.local/bin/bobnet
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          
+      - name: Run test suite
+        run: ./tests/run-all.sh
