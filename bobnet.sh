@@ -4826,6 +4826,160 @@ EOF
     fi
 }
 
+cmd_work() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        start)
+            cmd_work_start "$@"
+            ;;
+        done)
+            cmd_work_done "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet work <command> [options]
+
+Work tracking commands for managing GitHub issues and project boards.
+
+COMMANDS:
+  start <issue>          Mark issue as "In Progress" and assign to self
+  done <issue>           Mark issue as "Done" and close with commit references
+
+EXAMPLES:
+  bobnet work start 37
+  bobnet work done 37
+
+See 'bobnet work <command> help' for more information.
+EOF
+            ;;
+        *)
+            error "Unknown work command: $subcmd (try 'bobnet work help')"
+            ;;
+    esac
+}
+
+cmd_work_start() {
+    local issue_num="" repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet work start <issue> [options]
+
+Mark a GitHub issue as "In Progress" and assign to current agent.
+
+OPTIONS:
+  --repo, -R <owner/repo>   Target repository (default: current repo)
+
+WORKFLOW:
+  1. Validates issue exists
+  2. Assigns issue to current user (if not already assigned)
+  3. Updates GitHub Project status to "In Progress" (if in project)
+  4. Adds work-started comment with timestamp
+  5. Validates working directory matches repo
+
+EXAMPLES:
+  bobnet work start 37
+  bobnet work start 37 --repo buildzero-tech/bobnet-cli
+
+NEXT STEPS:
+  - Work on the issue
+  - Commit with: bobnet git commit "feat: description #37"
+  - When done: bobnet work done 37
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$issue_num" ]]; then
+                    issue_num="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$issue_num" ]] && error "Issue number is required"
+    
+    # Detect current repo if not specified
+    if [[ -z "$repo" ]]; then
+        repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+        [[ -z "$repo" ]] && error "Not in a git repository. Use --repo to specify target."
+    fi
+    
+    info "Starting work on $repo#$issue_num..."
+    
+    # TODO: Implement issue assignment, project status update, validation
+    error "Command not yet implemented (issue #37)"
+}
+
+cmd_work_done() {
+    local issue_num="" repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet work done <issue> [options]
+
+Mark a GitHub issue as "Done" and close it with commit references.
+
+OPTIONS:
+  --repo, -R <owner/repo>   Target repository (default: current repo)
+
+WORKFLOW:
+  1. Finds all commits referencing the issue
+  2. Updates GitHub Project status to "Done" (if in project)
+  3. Closes issue with comment listing commits
+  4. Shows summary of work completed
+
+EXAMPLES:
+  bobnet work done 37
+  bobnet work done 37 --repo buildzero-tech/bobnet-cli
+
+REQUIRES:
+  - At least one commit referencing the issue (#37)
+  - Issue must be open
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$issue_num" ]]; then
+                    issue_num="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$issue_num" ]] && error "Issue number is required"
+    
+    # Detect current repo if not specified
+    if [[ -z "$repo" ]]; then
+        repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+        [[ -z "$repo" ]] && error "Not in a git repository. Use --repo to specify target."
+    fi
+    
+    info "Completing work on $repo#$issue_num..."
+    
+    # TODO: Implement commit finding, project status update, issue closure
+    error "Command not yet implemented (issue #38)"
+}
+
 cmd_todo() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -5185,6 +5339,7 @@ COMMANDS:
   git [cmd]           Git attribution commands (commit, check)
   github [cmd]        GitHub integration (issues, milestones)
   spec [cmd]          Specification management (create-issues)
+  work [cmd]          Work tracking (start, done)
   todo [cmd]          Todo management and GitHub sync (list, status, sync)
   docs [cmd]          Documentation generation (roadmap, changelog, release)
   incident [cmd]      Incident tracking and post-mortems (create, close, list)
@@ -5223,6 +5378,7 @@ bobnet_main() {
         git) shift; cmd_git "$@" ;;
         github) shift; cmd_github "$@" ;;
         spec) shift; cmd_spec "$@" ;;
+        work) shift; cmd_work "$@" ;;
         todo) shift; cmd_todo "$@" ;;
         docs) shift; cmd_docs "$@" ;;
         incident) shift; cmd_incident "$@" ;;
