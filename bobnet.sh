@@ -5019,8 +5019,67 @@ EOF
     
     info "Completing work on $repo#$issue_num..."
     
-    # TODO: Implement commit finding, project status update, issue closure
-    error "Command not yet implemented (issue #38)"
+    # Validate issue exists and is open
+    local issue_state=$(gh issue view "$issue_num" --repo "$repo" --json state -q .state 2>/dev/null)
+    
+    if [[ -z "$issue_state" ]]; then
+        error "Issue #$issue_num not found in $repo"
+    fi
+    
+    if [[ "$issue_state" == "CLOSED" ]]; then
+        warn "Issue #$issue_num is already closed"
+        return 0
+    fi
+    
+    # Find commits referencing this issue
+    info "Finding commits referencing #$issue_num..."
+    
+    # Search commit messages for "#<issue_num>" pattern
+    local commits=$(git log --all --oneline --grep="#$issue_num" 2>/dev/null)
+    
+    if [[ -z "$commits" ]]; then
+        warn "No commits found referencing #$issue_num"
+        echo ""
+        read -p "Close issue anyway? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+        local close_body="Work completed (no commits found referencing this issue)"
+    else
+        local commit_count=$(echo "$commits" | wc -l | tr -d ' ')
+        success "Found $commit_count commit(s)"
+        echo ""
+        echo "$commits" | sed 's/^/  /'
+        echo ""
+        
+        # Build close comment with commit list
+        local close_body="✅ Work completed
+
+**Commits:**
+"
+        while read -r commit; do
+            local sha=$(echo "$commit" | awk '{print $1}')
+            local msg=$(echo "$commit" | cut -d' ' -f2-)
+            close_body+="
+- $sha: $msg"
+        done <<< "$commits"
+    fi
+    
+    # TODO: Update GitHub Project status to "Done" (needs project API integration)
+    
+    # Close issue with commit summary
+    info "Closing issue..."
+    gh issue close "$issue_num" --repo "$repo" --comment "$close_body"
+    
+    echo ""
+    success "Issue #$issue_num closed!"
+    
+    if [[ -n "$commits" ]]; then
+        echo ""
+        info "Don't forget to:"
+        echo "  - Update MEMORY.md: Mark todo [x] completed"
+        echo "  - Run: bobnet todo sync (to sync with GitHub)"
+    fi
 }
 
 cmd_todo() {
