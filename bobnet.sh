@@ -4917,8 +4917,51 @@ EOF
     
     info "Starting work on $repo#$issue_num..."
     
-    # TODO: Implement issue assignment, project status update, validation
-    error "Command not yet implemented (issue #37)"
+    # Validate issue exists and get current state
+    local issue_state=$(gh issue view "$issue_num" --repo "$repo" --json state -q .state 2>/dev/null)
+    
+    if [[ -z "$issue_state" ]]; then
+        error "Issue #$issue_num not found in $repo"
+    fi
+    
+    if [[ "$issue_state" == "CLOSED" ]]; then
+        warn "Issue #$issue_num is already closed"
+        read -p "Reopen and start work? [y/N] " -r
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+        gh issue reopen "$issue_num" --repo "$repo"
+    fi
+    
+    # Get current user
+    local current_user=$(gh api user -q .login 2>/dev/null)
+    
+    # Check if already assigned
+    local assignees=$(gh issue view "$issue_num" --repo "$repo" --json assignees -q '.assignees[].login' 2>/dev/null)
+    
+    if echo "$assignees" | grep -q "^${current_user}$"; then
+        success "Already assigned to you"
+    else
+        info "Assigning to $current_user..."
+        gh issue edit "$issue_num" --repo "$repo" --add-assignee "$current_user"
+        success "Assigned to $current_user"
+    fi
+    
+    # Add work-started comment
+    local timestamp=$(date -u +"%Y-%m-%d %H:%M UTC")
+    gh issue comment "$issue_num" --repo "$repo" --body "🚧 Work started by @$current_user ($timestamp)"
+    
+    # TODO: Update GitHub Project status to "In Progress" (needs project API integration)
+    # For now, just note it
+    warn "Project status update not yet implemented - manually update on GitHub if needed"
+    
+    echo ""
+    success "Work started on $repo#$issue_num"
+    echo ""
+    info "Next steps:"
+    echo "  1. Work on the issue"
+    echo "  2. Commit with: bobnet git commit 'feat: description #$issue_num'"
+    echo "  3. When done: bobnet work done $issue_num"
 }
 
 cmd_work_done() {
