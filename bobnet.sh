@@ -3548,6 +3548,113 @@ EOF
     esac
 }
 
+cmd_spec() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        create-issues)
+            cmd_spec_create_issues "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet spec <command> [options]
+
+Specification management and GitHub issue generation.
+
+COMMANDS:
+  create-issues <file>    Create GitHub issues from spec file
+
+EXAMPLES:
+  bobnet spec create-issues docs/FEATURE-SPEC.md
+  bobnet spec create-issues docs/FEATURE-SPEC.md --project "BobNet Work"
+
+See 'bobnet spec <command> help' for more information.
+EOF
+            ;;
+        *)
+            error "Unknown spec command: $subcmd (try 'bobnet spec help')"
+            ;;
+    esac
+}
+
+cmd_spec_create_issues() {
+    local spec_file="" project="" milestone="" dry_run=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project|-p)
+                project="$2"
+                shift 2
+                ;;
+            --milestone|-m)
+                milestone="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet spec create-issues <file> [options]
+
+Create GitHub issues from a specification file.
+
+Parses the spec for context, Epics, and work items, then creates:
+- Milestone (if doesn't exist)
+- Epic parent issues with 'epic' label
+- Work item issues under Epics
+- Updates spec file with issue numbers
+
+OPTIONS:
+  --project, -p <name>     GitHub Project name (optional)
+  --milestone, -m <name>   Milestone name (overrides spec)
+  --dry-run                Show what would be created without creating
+
+WORKFLOW:
+  1. Parse spec file for context, Epics, work items
+  2. Search for existing milestones/Epics (deduplication)
+  3. Show proposed issue structure
+  4. Wait for user approval
+  5. Discover repo labels and map conventional types
+  6. Create Epic issues + work items
+  7. Update spec file with issue numbers
+
+EXAMPLES:
+  bobnet spec create-issues docs/TODO-FEATURE-SPEC.md
+  bobnet spec create-issues docs/EMAIL-SECURITY.md --project "BobNet Work"
+  bobnet spec create-issues docs/FEATURE.md --dry-run
+
+SPEC FILE REQUIREMENTS:
+  - Must have "Context:" field (BobNet Infrastructure, Monorepo Package, etc.)
+  - Must have "GitHub Milestone:" field
+  - Must have "### Epic:" sections with work items
+
+See docs/GITHUB-TRACKING-ENFORCEMENT.md for spec format details.
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$spec_file" ]]; then
+                    spec_file="$1"
+                    shift
+                else
+                    error "Unexpected argument: $1"
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$spec_file" ]] && error "Spec file is required"
+    [[ ! -f "$spec_file" ]] && error "Spec file not found: $spec_file"
+    
+    info "Parsing spec file: $spec_file"
+    
+    # TODO: Implement spec parsing and issue creation
+    error "Command not yet implemented (issue #36)"
+}
+
 cmd_github_issue_create() {
     # Parse arguments
     local title="" body="" labels=() assignees=() milestone="" repo=""
@@ -4659,6 +4766,7 @@ COMMANDS:
   search [pattern]    Search session transcripts (grep)
   git [cmd]           Git attribution commands (commit, check)
   github [cmd]        GitHub integration (issues, milestones)
+  spec [cmd]          Specification management (create-issues)
   todo [cmd]          Todo management and GitHub sync (list, status, sync)
   docs [cmd]          Documentation generation (roadmap, changelog, release)
   incident [cmd]      Incident tracking and post-mortems (create, close, list)
@@ -4696,6 +4804,7 @@ bobnet_main() {
         search) shift; cmd_search "$@" ;;
         git) shift; cmd_git "$@" ;;
         github) shift; cmd_github "$@" ;;
+        spec) shift; cmd_spec "$@" ;;
         todo) shift; cmd_todo "$@" ;;
         docs) shift; cmd_docs "$@" ;;
         incident) shift; cmd_incident "$@" ;;
