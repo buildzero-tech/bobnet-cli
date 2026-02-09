@@ -5,7 +5,44 @@ All notable changes to BobNet CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.13.0] - 2026-02-09
+
+### Added
+- **Project Board Automation** (Epic #86)
+  - `bobnet github project set-status <issue> <status>` - Set issue status in GitHub Project (#87)
+  - `bobnet github project set-priority <issue> <priority>` - Set issue priority (#88)
+  - `bobnet github project refresh [org/num]` - Refresh cached project metadata
+  - `bobnet work blocked <issue> <reason>` - Mark issue as blocked (#89)
+    - Sets Priority to "Waiting"
+    - Adds "blocked" label
+    - Posts comment with blocking reason
+  - Project metadata caching with 24-hour TTL (#91)
+  - Cache invalidation on stale field IDs (#92)
+  - Cross-repo project field support (#93)
+- Status values: not-started, in-progress, review, done
+- Priority values: low, medium, high, critical, waiting, deferred
+- Auto-status updates in `bobnet work start` (→ In Progress) and `bobnet work done` (→ Done)
+- Unblock workflow: `work start` removes blocked label, restores priority
+
+### Changed
+- `bobnet work start` now sets Status to "In Progress" automatically
+- `bobnet work done` now sets Status to "Done" automatically
+- `bobnet work start` removes "blocked" label if present
+
+### Documentation
+- Added project CLI commands to docs/COMMANDS.md (#94, #95)
+- Documented Priority field values including Waiting vs Deferred (#96, #97, #98)
+
+### Testing
+- New test suite: test-project-automation.sh (#99-#102)
+  - Status/priority normalization tests
+  - Project inference tests
+  - Cache path generation tests
+  - Live API tests (--live flag)
+
+---
+
+## [4.12.0] - 2026-02-09
 
 ### Added
 - GitHub Projects API integration for Epic field management (#79)
