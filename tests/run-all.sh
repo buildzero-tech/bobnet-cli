@@ -38,6 +38,7 @@ TEST_SCRIPTS=(
     "test-label-discovery.sh"
     "test-deduplication.sh"
     "test-release-docs.sh"
+    "test-project-automation.sh"
 )
 
 # Track results

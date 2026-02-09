@@ -338,6 +338,10 @@ bobnet github project set-priority 123 waiting
 - Use `deferred` for work intentionally postponed
 - Priority changes don't affect issue labels
 
+**Waiting vs Deferred:**
+- **Waiting** — Blocked by external dependency (API access, vendor response, upstream issue)
+- **Deferred** — Intentionally postponed (low priority, needs design first, out of scope for now)
+
 ---
 
 ### `bobnet github project refresh`
