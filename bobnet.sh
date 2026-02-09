@@ -5570,6 +5570,9 @@ cmd_work() {
         done)
             cmd_work_done "$@"
             ;;
+        blocked)
+            cmd_work_blocked "$@"
+            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet work <command> [options]
@@ -5577,12 +5580,14 @@ Usage: bobnet work <command> [options]
 Work tracking commands for managing GitHub issues and project boards.
 
 COMMANDS:
-  start <issue>          Mark issue as "In Progress" and assign to self
-  done <issue>           Mark issue as "Done" and close with commit references
+  start <issue>              Mark issue as "In Progress" and assign to self
+  done <issue>               Mark issue as "Done" and close with commit references
+  blocked <issue> <reason>   Mark issue as blocked (Priority: Waiting + blocked label)
 
 EXAMPLES:
   bobnet work start 37
   bobnet work done 37
+  bobnet work blocked 37 "Waiting for API access from vendor"
 
 See 'bobnet work <command> help' for more information.
 EOF
@@ -5727,9 +5732,24 @@ EOF
         fi
     fi
     
-    # TODO: Update GitHub Project status to "In Progress" (needs project API integration)
-    # For now, just note it
-    warn "Project status update not yet implemented - manually update on GitHub if needed"
+    # Update GitHub Project status to "In Progress"
+    local repo_name="${repo#*/}"
+    local project=$(infer_project_from_repo "$repo")
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    if set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Status" "In Progress" 2>/dev/null; then
+        success "Status set to 'In Progress'"
+    fi
+    
+    # Remove "blocked" label if present (unblocking)
+    local has_blocked=$(gh issue view "$issue_num" --repo "$repo" --json labels -q '.labels[].name' 2>/dev/null | grep -q "^blocked$" && echo "yes")
+    if [[ "$has_blocked" == "yes" ]]; then
+        gh issue edit "$issue_num" --repo "$repo" --remove-label "blocked" 2>/dev/null
+        # Restore priority to Medium (or original - but we don't track that, so Medium is safe default)
+        set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Priority" "Medium" 2>/dev/null || true
+        success "Removed 'blocked' label"
+    fi
     
     echo ""
     success "Work started on $repo#$issue_num"
@@ -5841,7 +5861,15 @@ EOF
         done <<< "$commits"
     fi
     
-    # TODO: Update GitHub Project status to "Done" (needs project API integration)
+    # Update GitHub Project status to "Done"
+    local repo_name="${repo#*/}"
+    local project=$(infer_project_from_repo "$repo")
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    if set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Status" "Done" 2>/dev/null; then
+        success "Status set to 'Done'"
+    fi
     
     # Close issue with commit summary
     info "Closing issue..."
@@ -5856,6 +5884,102 @@ EOF
         echo "  - Update MEMORY.md: Mark todo [x] completed"
         echo "  - Run: bobnet todo sync (to sync with GitHub)"
     fi
+}
+
+cmd_work_blocked() {
+    local issue_num="" reason="" repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet work blocked <issue> <reason> [options]
+
+Mark a GitHub issue as blocked with a reason.
+
+ACTIONS:
+  1. Sets Priority field to "Waiting" in GitHub Project
+  2. Adds "blocked" label to the issue
+  3. Posts a comment with the blocking reason
+
+OPTIONS:
+  --repo, -R <owner/repo>   Target repository (default: current repo)
+
+EXAMPLES:
+  bobnet work blocked 37 "Waiting for API access from vendor"
+  bobnet work blocked 37 "Depends on #38 being completed first"
+
+TO UNBLOCK:
+  bobnet work start <issue>  # Removes blocked label, restores priority
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$issue_num" ]]; then
+                    issue_num="$1"
+                    shift
+                elif [[ -z "$reason" ]]; then
+                    reason="$1"
+                    shift
+                else
+                    # Append additional words to reason
+                    reason="$reason $1"
+                    shift
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$issue_num" ]] && error "Issue number is required"
+    [[ -z "$reason" ]] && error "Blocking reason is required"
+    
+    # Detect current repo if not specified
+    if [[ -z "$repo" ]]; then
+        repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+        [[ -z "$repo" ]] && error "Not in a git repository. Use --repo to specify target."
+    fi
+    
+    local repo_name="${repo#*/}"
+    
+    info "Marking $repo#$issue_num as blocked..."
+    
+    # Validate issue exists
+    local issue_state=$(gh issue view "$issue_num" --repo "$repo" --json state -q .state 2>/dev/null)
+    [[ -z "$issue_state" ]] && error "Issue #$issue_num not found in $repo"
+    
+    # Ensure "blocked" label exists
+    if ! gh label list --repo "$repo" --json name -q '.[].name' | grep -q "^blocked$"; then
+        info "Creating 'blocked' label..."
+        gh label create "blocked" --repo "$repo" --color "B60205" --description "Work is blocked by external dependency" 2>/dev/null || true
+    fi
+    
+    # Add blocked label
+    gh issue edit "$issue_num" --repo "$repo" --add-label "blocked" 2>/dev/null
+    
+    # Set Priority to Waiting in project
+    local project=$(infer_project_from_repo "$repo")
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    if set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Priority" "Waiting" 2>/dev/null; then
+        info "Priority set to 'Waiting'"
+    fi
+    
+    # Post blocking reason as comment
+    local comment="🚫 **Blocked**
+
+**Reason:** $reason
+
+*To unblock: \`bobnet work start $issue_num\`*"
+    
+    gh issue comment "$issue_num" --repo "$repo" --body "$comment" >/dev/null
+    
+    success "Issue #$issue_num marked as blocked"
+    echo "  Reason: $reason"
 }
 
 cmd_docs_release_notes() {
