@@ -3715,15 +3715,23 @@ map_type_to_label() {
     
     case "$type" in
         Features*|feat*)
+            # Prefer type: feature, fallback to legacy enhancement/feature
+            echo "$labels" | grep -i "^type: feature$" | head -1 || \
             echo "$labels" | grep -i "^enhancement$\|^feature$" | head -1
             ;;
         Documentation*|docs*)
+            # Prefer type: docs, fallback to legacy documentation
+            echo "$labels" | grep -i "^type: docs$" | head -1 || \
             echo "$labels" | grep -i "^documentation$" | head -1
             ;;
         Testing*|test*)
+            # Prefer type: test, fallback to legacy testing
+            echo "$labels" | grep -i "^type: test$" | head -1 || \
             echo "$labels" | grep -i "^testing$" | head -1
             ;;
         Maintenance*|chore*)
+            # Prefer type: chore, fallback to legacy maintenance/chore
+            echo "$labels" | grep -i "^type: chore$" | head -1 || \
             echo "$labels" | grep -i "^maintenance$\|^chore$" | head -1
             ;;
         *)
