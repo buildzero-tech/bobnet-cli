@@ -1002,6 +1002,32 @@ EOF
         changes+=("bindings: $schema_count (schema) vs $config_count (live)")
     fi
     
+    # 4. Check preferences
+    local prefs=$(jq -c '.preferences // {}' "$BOBNET_SCHEMA" 2>/dev/null)
+    if [[ "$prefs" != "{}" && "$prefs" != "null" ]]; then
+        echo ""
+        echo "--- Preferences ---"
+        
+        # Session memory hook
+        local session_memory=$(echo "$prefs" | jq -c '.sessionMemory // null')
+        if [[ "$session_memory" != "null" ]]; then
+            local schema_enabled=$(echo "$session_memory" | jq -r '.enabled // true')
+            local schema_messages=$(echo "$session_memory" | jq -r '.messageCount // 15')
+            
+            local live_enabled=$($claw config get hooks.internal.entries.session-memory.enabled 2>/dev/null || echo "null")
+            local live_messages=$($claw config get hooks.internal.entries.session-memory.env.messages 2>/dev/null | tr -d '"' || echo "15")
+            
+            if [[ "$schema_enabled" == "$live_enabled" && "$schema_messages" == "$live_messages" ]]; then
+                success "session-memory in sync (messages: $schema_messages)"
+            else
+                echo "  session-memory:"
+                echo "    schema: enabled=$schema_enabled, messages=$schema_messages"
+                echo "    live:   enabled=$live_enabled, messages=$live_messages"
+                changes+=("preferences: session-memory drift")
+            fi
+        fi
+    fi
+    
     echo ""
     
     # Safety check: refuse to wipe everything
@@ -1086,9 +1112,37 @@ EOF
     local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$BOBNET_SCHEMA" 2>/dev/null || echo '[]')
     $claw config set bindings "$bindings" --json && success "bindings applied"
     
+    # Apply preferences (maps to OpenClaw hooks config)
+    local prefs=$(jq -c '.preferences // {}' "$BOBNET_SCHEMA" 2>/dev/null)
+    if [[ "$prefs" != "{}" && "$prefs" != "null" ]]; then
+        echo ""
+        echo "--- Preferences ---"
+        
+        # Session memory hook
+        local session_memory=$(echo "$prefs" | jq -c '.sessionMemory // null')
+        if [[ "$session_memory" != "null" ]]; then
+            local sm_enabled=$(echo "$session_memory" | jq -r '.enabled // true')
+            local sm_messages=$(echo "$session_memory" | jq -r '.messageCount // 15')
+            
+            # Build hooks config
+            local hooks_config="{\"internal\":{\"enabled\":true,\"entries\":{\"session-memory\":{\"enabled\":$sm_enabled,\"env\":{\"messages\":\"$sm_messages\"}}}}}"
+            $claw config set hooks "$hooks_config" --json && success "session-memory hook applied (messages: $sm_messages)"
+        fi
+    fi
+    
     echo ""
-    success "Sync complete - restart gateway to apply"
-    echo "  $claw gateway restart"
+    echo "Restarting gateway to apply changes..."
+    
+    # Send SIGUSR1 to running gateway for hot reload
+    local gw_pid=$(pgrep -f "openclaw gateway" 2>/dev/null | head -1)
+    if [[ -n "$gw_pid" ]]; then
+        kill -USR1 "$gw_pid" 2>/dev/null && success "Gateway reload triggered (pid $gw_pid)"
+    else
+        warn "Gateway not running - start with: $claw gateway"
+    fi
+    
+    echo ""
+    success "Sync complete"
 }
 
 cmd_unlock() {
@@ -3754,16 +3808,17 @@ ensure_label() {
 }
 
 # Create Epic issue
+# Note: Epic label deprecated in favor of Epic field in GitHub Projects
 create_epic_issue() {
     local repo="$1"
     local title="$2"
     local milestone="$3"
     local body="$4"
     
+    # Epic label deprecated - using Epic field in GitHub Projects instead
     local issue_url=$(gh issue create \
         --repo "$repo" \
         --title "$title" \
-        --label "epic" \
         --milestone "$milestone" \
         --body "$body" 2>&1)
     
@@ -3875,6 +3930,113 @@ extract_work_items() {
     ' "$spec_file"
 }
 
+# GitHub Projects API helpers
+get_project_id() {
+    local org="$1"
+    local project_num="$2"
+    
+    gh api graphql -f query='
+        query($org: String!, $number: Int!) {
+            organization(login: $org) {
+                projectV2(number: $number) {
+                    id
+                }
+            }
+        }
+    ' -f org="$org" -F number="$project_num" --jq '.data.organization.projectV2.id' 2>/dev/null
+}
+
+get_epic_field_metadata() {
+    local project_id="$1"
+    
+    gh api graphql -f query='
+        query($projectId: ID!) {
+            node(id: $projectId) {
+                ... on ProjectV2 {
+                    fields(first: 20) {
+                        nodes {
+                            ... on ProjectV2SingleSelectField {
+                                id
+                                name
+                                options {
+                                    id
+                                    name
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ' -f projectId="$project_id" --jq '.data.node.fields.nodes[] | select(.name == "Epic")' 2>/dev/null
+}
+
+get_issue_node_id() {
+    local repo="$1"
+    local issue_num="$2"
+    
+    gh api "repos/$repo/issues/$issue_num" --jq '.node_id' 2>/dev/null
+}
+
+add_issue_to_project_with_epic() {
+    local repo="$1"
+    local issue_num="$2"
+    local org="$3"
+    local project_num="$4"
+    local epic_name="$5"
+    
+    # Get project ID
+    local project_id=$(get_project_id "$org" "$project_num")
+    [[ -z "$project_id" ]] && { warn "Failed to get project ID"; return 1; }
+    
+    # Get issue node ID
+    local issue_node_id=$(get_issue_node_id "$repo" "$issue_num")
+    [[ -z "$issue_node_id" ]] && { warn "Failed to get issue node ID"; return 1; }
+    
+    # Add issue to project
+    local item_id=$(gh api graphql -f query='
+        mutation($projectId: ID!, $contentId: ID!) {
+            addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+                item {
+                    id
+                }
+            }
+        }
+    ' -f projectId="$project_id" -f contentId="$issue_node_id" --jq '.data.addProjectV2ItemById.item.id' 2>/dev/null)
+    
+    [[ -z "$item_id" ]] && { warn "Failed to add issue to project"; return 1; }
+    
+    # Set Epic field if specified
+    if [[ -n "$epic_name" ]]; then
+        local epic_metadata=$(get_epic_field_metadata "$project_id")
+        [[ -z "$epic_metadata" ]] && { warn "Epic field not found in project"; return 1; }
+        
+        local field_id=$(echo "$epic_metadata" | jq -r '.id')
+        local option_id=$(echo "$epic_metadata" | jq -r ".options[] | select(.name == \"$epic_name\") | .id")
+        
+        [[ -z "$option_id" ]] && { warn "Epic option '$epic_name' not found"; return 1; }
+        
+        gh api graphql -f query='
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(
+                    input: {
+                        projectId: $projectId
+                        itemId: $itemId
+                        fieldId: $fieldId
+                        value: { singleSelectOptionId: $optionId }
+                    }
+                ) {
+                    projectV2Item {
+                        id
+                    }
+                }
+            }
+        ' -f projectId="$project_id" -f itemId="$item_id" -f fieldId="$field_id" -f optionId="$option_id" >/dev/null 2>&1
+        
+        return 0
+    fi
+}
+
 cmd_spec() {
     local subcmd="${1:-help}"
     shift 2>/dev/null || true
@@ -3906,12 +4068,19 @@ EOF
 }
 
 cmd_spec_create_issues() {
-    local spec_file="" project="" milestone="" dry_run=false
+    local spec_file="" project="" milestone="" dry_run=false project_org="" project_num=""
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --project|-p)
-                project="$2"
+                # Format: "org/number" or just "number" (defaults to buildzero-tech)
+                if [[ "$2" == *"/"* ]]; then
+                    project_org="${2%%/*}"
+                    project_num="${2##*/}"
+                else
+                    project_org="buildzero-tech"
+                    project_num="$2"
+                fi
                 shift 2
                 ;;
             --milestone|-m)
@@ -3992,10 +4161,18 @@ EOF
     [[ -z "$spec_milestone" ]] && error "Spec missing **GitHub Milestone:** field"
     [[ -z "$primary_repo" ]] && error "Spec missing **Primary Repository:** field"
     
+    # Default project for BobNet Infrastructure
+    if [[ -z "$project_num" && "$context" == "BobNet Infrastructure" ]]; then
+        project_org="buildzero-tech"
+        project_num="4"
+        info "Using default BobNet Work project (buildzero-tech #4)"
+    fi
+    
     info "Context: $context"
     info "Milestone: $spec_milestone"
     info "Primary Repository: $primary_repo"
     [[ -n "$additional_repos" ]] && info "Additional Repos: $additional_repos"
+    [[ -n "$project_num" ]] && info "GitHub Project: $project_org #$project_num"
     
     # Extract Epics
     local epics=$(extract_epics "$spec_file")
@@ -4103,6 +4280,11 @@ EOF
         success "  Created Epic $epic_repo#$epic_number"
         epic_updates+=("$line_num|$epic_repo|$epic_number")
         
+        # Add Epic issue to project (without Epic field - it's the parent)
+        if [[ -n "$project_num" ]]; then
+            add_issue_to_project_with_epic "$epic_repo" "$epic_number" "$project_org" "$project_num" ""
+        fi
+        
         # Extract and create work items for this Epic
         local work_items=$(extract_work_items "$spec_file" "$line_num")
         
@@ -4143,6 +4325,11 @@ EOF
             
             echo "  → Created $item_repo#$item_number: $item_title"
             item_updates+=("$line_num|$category|$item_title|$item_repo|$item_number")
+            
+            # Add work item to project with Epic field
+            if [[ -n "$project_num" ]]; then
+                add_issue_to_project_with_epic "$item_repo" "$item_number" "$project_org" "$project_num" "$clean_epic_title"
+            fi
         done <<< "$work_items"
         
         echo ""
@@ -5096,8 +5283,51 @@ EOF
     fi
     
     # Add work-started comment
-    local timestamp=$(date -u +"%Y-%m-%d %H:%M UTC")
+    local timestamp=$(date -u +"%Y-%m-d %H:%M UTC")
     gh issue comment "$issue_num" --repo "$repo" --body "🚧 Work started by @$current_user ($timestamp)"
+    
+    # Validate Epic field for BobNet repos
+    if [[ "$repo" =~ ^buildzero-tech/(bobnet-cli|ultima-thule)$ ]]; then
+        local project_id=$(get_project_id "buildzero-tech" "4")
+        if [[ -n "$project_id" ]]; then
+            local issue_node_id=$(get_issue_node_id "$repo" "$issue_num")
+            if [[ -n "$issue_node_id" ]]; then
+                # Query for project item and Epic field
+                local epic_value=$(gh api graphql -f query='
+                    query($org: String!, $number: Int!) {
+                        organization(login: $org) {
+                            projectV2(number: $number) {
+                                items(first: 100) {
+                                    nodes {
+                                        id
+                                        content {
+                                            ... on Issue {
+                                                number
+                                                repository {
+                                                    nameWithOwner
+                                                }
+                                            }
+                                        }
+                                        fieldValueByName(name: "Epic") {
+                                            ... on ProjectV2ItemFieldSingleSelectValue {
+                                                name
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ' -f org="buildzero-tech" -F number=4 --jq ".data.organization.projectV2.items.nodes[] | select(.content.repository.nameWithOwner == \"$repo\" and .content.number == $issue_num) | .fieldValueByName.name // empty" 2>/dev/null)
+                
+                if [[ -z "$epic_value" ]]; then
+                    warn "Epic field not set - consider setting it via GitHub Project UI"
+                else
+                    success "Epic: $epic_value"
+                fi
+            fi
+        fi
+    fi
     
     # TODO: Update GitHub Project status to "In Progress" (needs project API integration)
     # For now, just note it
