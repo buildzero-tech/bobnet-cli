@@ -3754,16 +3754,17 @@ ensure_label() {
 }
 
 # Create Epic issue
+# Note: Epic label deprecated in favor of Epic field in GitHub Projects
 create_epic_issue() {
     local repo="$1"
     local title="$2"
     local milestone="$3"
     local body="$4"
     
+    # Epic label deprecated - using Epic field in GitHub Projects instead
     local issue_url=$(gh issue create \
         --repo "$repo" \
         --title "$title" \
-        --label "epic" \
         --milestone "$milestone" \
         --body "$body" 2>&1)
     
