@@ -1,0 +1,6 @@
+# File: .github/ISSUE_TEMPLATE/config.yml
+blank_issues_enabled: true
+contact_links:
+  - name: BobNet Discussion
+    url: https://github.com/buildzero-tech/bobnet-cli/discussions
+    about: Ask questions and discuss ideas
