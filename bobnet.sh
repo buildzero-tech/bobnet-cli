@@ -2549,6 +2549,253 @@ EOF
     esac
 }
 
+# =============================================================================
+# Draft Management Functions (Phase 5: Email Approval Workflow)
+# =============================================================================
+
+get_draft_dir() {
+    local user="${1:-$USER}"
+    echo "$HOME/.bobnet/email-drafts/$user"
+}
+
+generate_draft_id() {
+    echo "draft-$(date +%Y%m%d-%H%M%S)-$$"
+}
+
+classify_content() {
+    local text="$1"
+    local highest_class="public"
+    
+    # Secret patterns
+    if echo "$text" | grep -Eiq 'password|api[_-]?key|token|secret|credentials'; then
+        highest_class="secret"
+    elif echo "$text" | grep -Eq '[A-Z0-9]{32,}'; then
+        highest_class="secret"
+    elif echo "$text" | grep -Eq '\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b'; then
+        highest_class="secret"
+    # Sensitive patterns
+    elif echo "$text" | grep -Eiq 'revenue|contract|salary|confidential'; then
+        highest_class="sensitive"
+    # Internal patterns
+    elif echo "$text" | grep -Eq 'buildzero\.tech|Ice 9'; then
+        highest_class="internal"
+    # Technical patterns
+    elif echo "$text" | grep -Eiq 'OpenClaw|BobNet|GitHub|database|API'; then
+        highest_class="technical-general"
+    fi
+    
+    echo "$highest_class"
+}
+
+draft_save() {
+    local to=""
+    local subject=""
+    local body=""
+    local user="$USER"
+    local expires_min=60
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to) to="$2"; shift 2 ;;
+            --subject) subject="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            --user) user="$2"; shift 2 ;;
+            --expires) expires_min="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet draft save --to <email> --subject <subject> --body <body>
+
+OPTIONS:
+  --to <email>        Recipient (required)
+  --subject <text>    Subject (required)
+  --body <text>       Body (required)
+  --expires <min>     Expiration (default: 60)
+
+OUTPUT: Draft ID
+EOF
+                return 0 ;;
+            *) error "Unknown argument: $1" ;;
+        esac
+    done
+    
+    [[ -z "$to" || -z "$subject" || -z "$body" ]] && \
+        error "Missing required fields"
+    
+    local info_class=$(classify_content "$body")
+    local trust_score="0.0"
+    local user_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    
+    if [[ -f "$user_db" ]]; then
+        local score=$(sqlite3 "$user_db" \
+            "SELECT COALESCE(trust_score, 0.0) FROM contacts WHERE email = '$to'" 2>/dev/null || echo "")
+        [[ -n "$score" ]] && trust_score="$score" || trust_score="0.0"
+    fi
+    
+    local draft_id=$(generate_draft_id)
+    local draft_dir=$(get_draft_dir "$user")
+    mkdir -p "$draft_dir"
+    
+    local now=$(date +%s)
+    local expires_at=$((now + expires_min * 60))
+    
+    jq -n \
+        --arg id "$draft_id" \
+        --arg user "$user" \
+        --arg to "$to" \
+        --arg subject "$subject" \
+        --arg body "$body" \
+        --arg info_class "$info_class" \
+        --arg trust_score "$trust_score" \
+        --arg created_at "$now" \
+        --arg expires_at "$expires_at" \
+        '{
+            id: $id, user: $user, to: $to, subject: $subject, body: $body,
+            info_class: $info_class, trust_score: ($trust_score | tonumber),
+            created_at: ($created_at | tonumber), expires_at: ($expires_at | tonumber)
+        }' > "$draft_dir/$draft_id.json"
+    
+    echo "$draft_id"
+}
+
+draft_list() {
+    local user="$USER"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            -h|--help) echo "USAGE: bobnet draft list [--user <name>]"; return 0 ;;
+            *) error "Unknown argument: $1" ;;
+        esac
+    done
+    
+    local draft_dir=$(get_draft_dir "$user")
+    [[ ! -d "$draft_dir" ]] && echo "No drafts" && return 0
+    
+    local count=0
+    echo "Drafts ($user):"
+    for draft_file in "$draft_dir"/*.json; do
+        [[ ! -f "$draft_file" ]] && continue
+        echo "[$(jq -r '.id' "$draft_file")]"
+        echo "  To: $(jq -r '.to' "$draft_file")"
+        echo "  Subject: $(jq -r '.subject' "$draft_file")"
+        echo "  Class: $(jq -r '.info_class' "$draft_file")"
+        echo ""
+        ((count++))
+    done
+    [[ $count -eq 0 ]] && echo "No drafts" || echo "Total: $count"
+}
+
+draft_show() {
+    local draft_id="${1:-}"
+    local user="$USER"
+    
+    [[ "$draft_id" =~ ^(-h|--help)$ ]] && \
+        echo "USAGE: bobnet draft show <draft-id>" && return 0
+    
+    [[ "${2:-}" == "--user" ]] && user="${3:-}"
+    [[ -z "$draft_id" ]] && error "Draft ID required"
+    
+    local draft_file="$(get_draft_dir "$user")/$draft_id.json"
+    [[ ! -f "$draft_file" ]] && error "Draft not found: $draft_id"
+    
+    echo "Draft: $draft_id"
+    echo "To: $(jq -r '.to' "$draft_file")"
+    echo "Subject: $(jq -r '.subject' "$draft_file")"
+    echo ""
+    echo "Body:"
+    echo "$(jq -r '.body' "$draft_file")"
+    echo ""
+    echo "Class: $(jq -r '.info_class' "$draft_file") | Trust: $(jq -r '.trust_score' "$draft_file")"
+}
+
+draft_delete() {
+    local draft_id="${1:-}"
+    local user="$USER"
+    
+    [[ "$draft_id" =~ ^(-h|--help)$ ]] && \
+        echo "USAGE: bobnet draft delete <draft-id>" && return 0
+    
+    [[ "${2:-}" == "--user" ]] && user="${3:-}"
+    [[ -z "$draft_id" ]] && error "Draft ID required"
+    
+    local draft_file="$(get_draft_dir "$user")/$draft_id.json"
+    [[ ! -f "$draft_file" ]] && error "Draft not found: $draft_id"
+    
+    rm "$draft_file"
+    success "Draft deleted: $draft_id"
+}
+
+draft_check_auto_send() {
+    local to=""
+    local body=""
+    local user="$USER"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to) to="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            --user) user="$2"; shift 2 ;;
+            -h|--help)
+                echo "USAGE: bobnet draft check-auto-send --to <email> --body <text>"
+                echo "EXIT: 0=auto-send, 1=draft-first"
+                return 0 ;;
+            *) error "Unknown argument: $1" ;;
+        esac
+    done
+    
+    [[ -z "$to" || -z "$body" ]] && error "Missing --to or --body"
+    
+    local user_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    [[ ! -f "$user_db" ]] && echo "draft-first" && return 1
+    
+    local data=$(sqlite3 "$user_db" \
+        "SELECT trust_score, auto_send FROM contacts WHERE email = '$to'" 2>/dev/null || echo "")
+    
+    [[ -z "$data" ]] && echo "draft-first" && return 1
+    
+    local trust_score=$(echo "$data" | cut -d'|' -f1)
+    local auto_send=$(echo "$data" | cut -d'|' -f2)
+    local info_class=$(classify_content "$body")
+    
+    if [[ "$auto_send" -eq 1 ]] && \
+       awk "BEGIN {exit !($trust_score >= 0.7)}" && \
+       [[ "$info_class" != "sensitive" && "$info_class" != "secret" ]]; then
+        echo "auto-send"
+        return 0
+    fi
+    
+    echo "draft-first"
+    return 1
+}
+
+cmd_draft() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        save) draft_save "$@" ;;
+        list) draft_list "$@" ;;
+        show) draft_show "$@" ;;
+        delete) draft_delete "$@" ;;
+        check-auto-send) draft_check_auto_send "$@" ;;
+        -h|--help|help)
+            cat <<'EOF'
+USAGE: bobnet draft <command> [options]
+
+COMMANDS:
+  save                Create email draft
+  list                List drafts
+  show <draft-id>     Show draft details
+  delete <draft-id>   Delete draft
+  check-auto-send     Check if email should auto-send
+
+Run 'bobnet draft <command> --help' for details.
+EOF
+            ;;
+        *) error "Unknown draft command: $subcmd" ;;
+    esac
+}
+
 trust_init() {
     local user="$USER"
     local force=false
@@ -6669,6 +6916,7 @@ bobnet_main() {
         lock) cmd_lock ;;
         update) cmd_update ;;
         trust) shift; cmd_trust "$@" ;;
+        draft) shift; cmd_draft "$@" ;;
         restart) shift; cmd_restart "$@" ;;
         upgrade) shift; cmd_upgrade "$@" ;;
         help|--help|-h) cmd_help ;;
