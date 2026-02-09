@@ -3044,7 +3044,7 @@ EOF
     
     # Check contact state
     local state deleted_at
-    read -r state deleted_at <<< $(sqlite3 "$registry_db" \
+    IFS='|' read -r state deleted_at <<< $(sqlite3 "$registry_db" \
         "SELECT state, deleted_at FROM contacts WHERE email = '$email';")
     
     [[ -z "$state" ]] && error "Contact not found: $email"
@@ -3222,6 +3222,106 @@ WHERE state = 'active'
   AND EXISTS (SELECT 1 FROM contact_sources WHERE contact_id = contacts.id);
 EOF2
                 success "Archived $archive_count contact(s)"
+            fi
+        fi
+    else
+        echo "  No candidates found"
+    fi
+    
+    echo ""
+    
+    # Rule 2: Delete stale manual contacts with zero trust
+    echo "🗑️  Delete candidates (stale manual, zero trust):"
+    local delete_manual=$(sqlite3 "$registry_db" -separator $'\t' <<'EOF'
+SELECT email, name, trust_score,
+       (strftime('%s', 'now') - COALESCE(last_interaction_at, created_at)) / 86400 AS days_inactive
+FROM contacts
+WHERE state = 'active'
+  AND ((strftime('%s', 'now') - COALESCE(last_interaction_at, created_at)) / 86400) >= 730
+  AND trust_score = 0.0
+  AND NOT EXISTS (SELECT 1 FROM contact_sources WHERE contact_id = contacts.id);
+EOF
+)
+    
+    if [[ -n "$delete_manual" ]]; then
+        echo "$delete_manual" | while IFS=$'\t' read -r email name score days; do
+            echo "  $email ($name) - trust: $score, inactive: ${days} days"
+        done
+        
+        local delete_count=$(echo "$delete_manual" | wc -l | tr -d ' ')
+        
+        if [[ "$dry_run" == "false" ]]; then
+            if [[ "$auto_yes" == "false" ]]; then
+                read -p "Delete $delete_count contact(s)? [y/N] " -n 1 -r
+                echo
+                [[ ! $REPLY =~ ^[Yy]$ ]] && echo "Skipped delete." || {
+                    sqlite3 "$registry_db" <<'EOF2'
+UPDATE contacts
+SET state = 'deleted',
+    deleted_at = strftime('%s', 'now'),
+    updated_at = strftime('%s', 'now')
+WHERE state = 'active'
+  AND ((strftime('%s', 'now') - COALESCE(last_interaction_at, created_at)) / 86400) >= 730
+  AND trust_score = 0.0
+  AND NOT EXISTS (SELECT 1 FROM contact_sources WHERE contact_id = contacts.id);
+EOF2
+                    success "Deleted $delete_count contact(s)"
+                }
+            else
+                sqlite3 "$registry_db" <<'EOF2'
+UPDATE contacts
+SET state = 'deleted',
+    deleted_at = strftime('%s', 'now'),
+    updated_at = strftime('%s', 'now')
+WHERE state = 'active'
+  AND ((strftime('%s', 'now') - COALESCE(last_interaction_at, created_at)) / 86400) >= 730
+  AND trust_score = 0.0
+  AND NOT EXISTS (SELECT 1 FROM contact_sources WHERE contact_id = contacts.id);
+EOF2
+                success "Deleted $delete_count contact(s)"
+            fi
+        fi
+    else
+        echo "  No candidates found"
+    fi
+    
+    echo ""
+    
+    # Rule 3: Delete blocked contacts
+    echo "🚫 Delete candidates (blocked, trust < -0.5):"
+    local delete_blocked=$(sqlite3 "$registry_db" -separator $'\t' \
+        "SELECT email, name, trust_score FROM contacts WHERE state = 'active' AND trust_score < -0.5;")
+    
+    if [[ -n "$delete_blocked" ]]; then
+        echo "$delete_blocked" | while IFS=$'\t' read -r email name score; do
+            echo "  $email ($name) - trust: $score"
+        done
+        
+        local blocked_count=$(echo "$delete_blocked" | wc -l | tr -d ' ')
+        
+        if [[ "$dry_run" == "false" ]]; then
+            if [[ "$auto_yes" == "false" ]]; then
+                read -p "Delete $blocked_count blocked contact(s)? [y/N] " -n 1 -r
+                echo
+                [[ ! $REPLY =~ ^[Yy]$ ]] && echo "Skipped delete." || {
+                    sqlite3 "$registry_db" <<'EOF2'
+UPDATE contacts
+SET state = 'deleted',
+    deleted_at = strftime('%s', 'now'),
+    updated_at = strftime('%s', 'now')
+WHERE state = 'active' AND trust_score < -0.5;
+EOF2
+                    success "Deleted $blocked_count contact(s)"
+                }
+            else
+                sqlite3 "$registry_db" <<'EOF2'
+UPDATE contacts
+SET state = 'deleted',
+    deleted_at = strftime('%s', 'now'),
+    updated_at = strftime('%s', 'now')
+WHERE state = 'active' AND trust_score < -0.5;
+EOF2
+                success "Deleted $blocked_count contact(s)"
             fi
         fi
     else
