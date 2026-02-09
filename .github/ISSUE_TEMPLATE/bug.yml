@@ -1,0 +1,75 @@
+# File: .github/ISSUE_TEMPLATE/bug.yml
+name: Bug Report
+description: Report a bug in BobNet
+title: "[Bug]: "
+labels: ["type: bug"]
+projects: ["buildzero-tech/4"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+        Help us fix the issue you've encountered.
+  
+  - type: input
+    id: title
+    attributes:
+      label: Bug Title
+      description: Brief, descriptive title
+      placeholder: "Command fails when..."
+    validations:
+      required: true
+  
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened?
+      placeholder: "When I run `bobnet command`, I expected X but got Y..."
+    validations:
+      required: true
+  
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this?
+      placeholder: |
+        1. Run command `bobnet ...`
+        2. Observe error
+        3. ...
+    validations:
+      required: true
+  
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened?
+      placeholder: "The command should..."
+    validations:
+      required: false
+  
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+      placeholder: "Instead, it..."
+    validations:
+      required: false
+  
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How severe is this bug?
+      options:
+        - Low (minor annoyance)
+        - Medium (affects workflow)
+        - High (blocks work)
+        - Critical (data loss/security)
+      default: 0
+    validations:
+      required: false
