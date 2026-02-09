@@ -1,0 +1,56 @@
+# File: .github/ISSUE_TEMPLATE/feature.yml
+name: Feature Request
+description: Propose a new feature for BobNet
+title: "[Feature]: "
+labels: ["type: feature"]
+projects: ["buildzero-tech/4"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Feature Request
+        Describe the feature you'd like to see in BobNet.
+  
+  - type: input
+    id: title
+    attributes:
+      label: Feature Title
+      description: Brief, descriptive title
+      placeholder: "Add foo command"
+    validations:
+      required: true
+  
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What should this feature do?
+      placeholder: "This feature should..."
+    validations:
+      required: true
+  
+  - type: dropdown
+    id: epic
+    attributes:
+      label: Epic
+      description: Which Epic does this relate to?
+      options:
+        - None
+        - CLI Implementation
+        - Release Automation
+        - Pattern Documentation
+        - GitHub Workflow Improvements
+      default: 0
+    validations:
+      required: false
+  
+  - type: checkboxes
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How will we know this is complete?
+      options:
+        - label: Feature implemented
+        - label: Tests added
+        - label: Documentation updated
