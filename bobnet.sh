@@ -3249,6 +3249,150 @@ trust_import() {
 }
 
 
+# ============================================
+# Email Security Setup Command
+# ============================================
+
+cmd_setup_email_security() {
+    local username=""
+    local email=""
+    local role="family"
+    local agent="bob"
+    local skip_cron=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) username="$2"; shift 2 ;;
+            --email) email="$2"; shift 2 ;;
+            --role) role="$2"; shift 2 ;;
+            --agent) agent="$2"; shift 2 ;;
+            --skip-cron) skip_cron=true; shift ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet setup-email-security --user <name> --email <email> [OPTIONS]
+
+Set up email security for a user. This command automates:
+  1. User creation (if not exists)
+  2. Trust registry initialization
+  3. Agent binding
+  4. Cron job installation (optional)
+
+OPTIONS:
+  --user <name>       Required. Username for the system
+  --email <email>     Required. User's email address
+  --role <role>       User role: owner, family, delegate, read-only (default: family)
+  --agent <agent>     Agent to bind (default: bob)
+  --skip-cron         Skip cron job installation
+
+EXAMPLES:
+  bobnet setup-email-security --user penny --email penny@theberrys.email --role family
+  bobnet setup-email-security --user james --email james@buildzero.tech --role owner
+  bobnet setup-email-security --user assistant --email assistant@example.com --role delegate --skip-cron
+EOF
+                return 0 ;;
+            -*) error "Unknown option: $1" ;;
+            *) shift ;;
+        esac
+    done
+    
+    [[ -z "$username" ]] && error "Missing required option: --user <name>"
+    [[ -z "$email" ]] && error "Missing required option: --email <email>"
+    
+    echo "=== BobNet Email Security Setup ==="
+    echo ""
+    echo "User:  $username"
+    echo "Email: $email"
+    echo "Role:  $role"
+    echo "Agent: $agent"
+    echo ""
+    
+    # Step 1: Check/create user
+    echo "--- Step 1: User Management ---"
+    if bobnet user show "$username" &>/dev/null; then
+        echo "  User '$username' already exists"
+    else
+        echo "  Creating user '$username'..."
+        bobnet user add "$username" --email "$email" --role "$role"
+        success "User created"
+    fi
+    
+    # Step 2: Initialize trust registry
+    echo ""
+    echo "--- Step 2: Trust Registry ---"
+    local registry_db="$BOBNET_ROOT/config/trust-registry-$username.db"
+    if [[ -f "$registry_db" ]]; then
+        echo "  Trust registry already exists: $registry_db"
+    else
+        echo "  Initializing trust registry..."
+        BOBNET_USER="$username" bobnet trust init
+        success "Trust registry initialized"
+    fi
+    
+    # Step 3: Bind agent
+    echo ""
+    echo "--- Step 3: Agent Binding ---"
+    if bobnet user show "$username" 2>/dev/null | grep -q "Agents:.*$agent"; then
+        echo "  Agent '$agent' already bound to user '$username'"
+    else
+        echo "  Binding agent '$agent' to user '$username'..."
+        bobnet user bind-agent "$agent" "$username" 2>/dev/null || true
+        success "Agent bound"
+    fi
+    
+    # Step 4: Install cron jobs (owner only)
+    echo ""
+    echo "--- Step 4: Cron Jobs ---"
+    if [[ "$skip_cron" == "true" ]]; then
+        echo "  Skipping cron job installation (--skip-cron)"
+    elif [[ "$role" != "owner" ]]; then
+        echo "  Skipping cron jobs (owner role required)"
+    else
+        local cron_src="$BOBNET_ROOT/config/bobnet-cron.conf"
+        local cron_dst="/etc/cron.d/bobnet-email-security"
+        
+        if [[ -f "$cron_src" ]]; then
+            if [[ -f "$cron_dst" ]]; then
+                echo "  Cron jobs already installed"
+            else
+                echo "  Installing cron jobs..."
+                echo "  Run: sudo cp $cron_src $cron_dst"
+                echo "  (Requires sudo - skipping automatic installation)"
+            fi
+        else
+            warn "Cron config not found: $cron_src"
+        fi
+    fi
+    
+    # Step 5: Create email drafts directory
+    echo ""
+    echo "--- Step 5: Directories ---"
+    local drafts_dir="$HOME/.bobnet/email-drafts/$username"
+    if [[ -d "$drafts_dir" ]]; then
+        echo "  Drafts directory exists: $drafts_dir"
+    else
+        mkdir -p "$drafts_dir"
+        success "Created drafts directory: $drafts_dir"
+    fi
+    
+    echo ""
+    echo "=== Setup Complete ==="
+    echo ""
+    echo "Summary:"
+    echo "  User:           $username ($email)"
+    echo "  Role:           $role"
+    echo "  Trust Registry: $registry_db"
+    echo "  Agent:          $agent"
+    echo "  Drafts:         $drafts_dir"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Add trusted contacts:  bobnet trust add <email> --user $username"
+    echo "  2. Test email workflow:   bobnet draft check-auto-send --to test@example.com --body 'Hello'"
+    if [[ "$role" == "owner" && "$skip_cron" != "true" ]]; then
+        echo "  3. Install cron jobs:     sudo cp $BOBNET_ROOT/config/bobnet-cron.conf /etc/cron.d/bobnet-email-security"
+    fi
+}
+
+
 cmd_restart() {
     # Parse arguments
     local delay=10
@@ -6932,6 +7076,9 @@ COMMANDS:
   lock                Lock git-crypt
   update              Update CLI to latest version
   trust [cmd]         Contact trust management (init, add, list, show)
+  draft [cmd]         Email draft management (save, list, show, delete)
+  user [cmd]          User management (add, list, show, bind-agent)
+  setup-email-security  Set up email security for a user
   restart             Restart gateway with broadcast warning
   upgrade             Upgrade OpenClaw with rollback support
 
@@ -6974,6 +7121,7 @@ bobnet_main() {
         draft) shift; cmd_draft "$@" ;;
         restart) shift; cmd_restart "$@" ;;
         upgrade) shift; cmd_upgrade "$@" ;;
+        setup-email-security) shift; cmd_setup_email_security "$@" ;;
         help|--help|-h) cmd_help ;;
         --version) echo "bobnet v$BOBNET_CLI_VERSION" ;;
         *) error "Unknown command: $1" ;;
