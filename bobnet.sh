@@ -3034,8 +3034,8 @@ EOF
         sleep 0.1
     done
     
-    # Write log entry
-    jq -n \
+    # Write log entry (compact JSON, one per line)
+    jq -cn \
         --arg ts "$(date -u +%s)" \
         --arg action "$action" \
         --arg user "$user" \
