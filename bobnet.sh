@@ -2549,6 +2549,46 @@ EOF
     esac
 }
 
+cmd_user() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        add) user_add "$@" ;;
+        list) user_list "$@" ;;
+        show) user_show "$@" ;;
+        bind-agent) user_bind_agent "$@" ;;
+        deactivate) user_deactivate "$@" ;;
+        -h|--help|help)
+            cat <<'EOF'
+USAGE: bobnet user <command> [options]
+
+COMMANDS:
+  add <username>      Add new user
+  list                List all users
+  show <username>     Show user details
+  bind-agent          Bind agent to user
+  deactivate          Deactivate user account
+
+OPTIONS:
+  --email <email>     User email address (required for add)
+  --role <role>       User role: owner, family, delegate, read-only
+  --contact <email>   Link to existing contact
+  --all               Show inactive users (list command)
+
+EXAMPLES:
+  bobnet user add penny --email penny@buildzero.tech --role family
+  bobnet user bind-agent bob penny
+  bobnet user list --all
+  bobnet user show penny
+
+Run 'bobnet user <command> --help' for command details.
+EOF
+            ;;
+        *) error "Unknown user command: $subcmd" ;;
+    esac
+}
+
 trust_init() {
     local user="$USER"
     local force=false
@@ -2603,6 +2643,9 @@ EOF
 }
 
 trust_add() {
+    # Permission check (Phase 4: RBAC)
+    check_permission "contact_add" || return 1
+    
     local email=""
     local name=""
     local user="$USER"
@@ -2812,6 +2855,9 @@ SQL
 }
 
 trust_set() {
+    # Permission check (Phase 4: RBAC)
+    check_permission "contact_set_trust" || return 1
+    
     local email=""
     local user="$USER"
     local trust_level=""
@@ -2876,14 +2922,20 @@ EOF
     local now=$(date +%s)
     sqlite3 "$registry_db" "UPDATE contacts SET $updates, updated_at = $now WHERE email = '$email'"
     
-    # Log trust event if score changed
+    # Log trust event if score changed (with attribution)
     if [[ -n "$trust_score" ]]; then
         local contact_id=$(sqlite3 "$registry_db" "SELECT id FROM contacts WHERE email = '$email'")
         local delta=$(echo "$trust_score - $old_score" | bc)
         
+        # Get attribution context
+        local attr_user="${BOBNET_USER:-$(get_current_user)}"
+        local attr_agent="${BOBNET_AGENT:-cli}"
+        local attr_channel="${BOBNET_CHANNEL:-cli}"
+        
         sqlite3 "$registry_db" <<SQL
-INSERT INTO trust_events (contact_id, timestamp, event_type, trust_delta, old_score, new_score)
-VALUES ($contact_id, $now, 'manual_update', $delta, $old_score, $trust_score);
+INSERT INTO trust_events (contact_id, timestamp, event_type, trust_delta, old_score, new_score, metadata)
+VALUES ($contact_id, $now, 'manual_update', $delta, $old_score, $trust_score, 
+    json_object('user', '$attr_user', 'agent', '$attr_agent', 'channel', '$attr_channel'));
 SQL
     fi
     
@@ -2946,6 +2998,487 @@ trust_import() {
     warn "Import functionality not yet implemented. Planned for Phase 3."
 }
 
+# =============================================================================
+# User Management Functions (Phase 4: Multi-User RBAC)
+# =============================================================================
+
+# Get current user from environment or config
+get_current_user() {
+    local user="${BOBNET_USER:-}"
+    
+    if [ -z "$user" ]; then
+        local config_file="${BOBNET_CONFIG:-$HOME/.bobnet/config.json}"
+        if [ -f "$config_file" ]; then
+            user=$(jq -r '.default_user // "james"' "$config_file" 2>/dev/null || echo "james")
+        else
+            user="james"
+        fi
+    fi
+    
+    echo "$user"
+}
+
+# Get user database path
+get_user_db() {
+    local username="${1:-$(get_current_user)}"
+    local config_dir="${BOBNET_CONFIG_DIR:-$HOME/.bobnet/config}"
+    echo "$config_dir/trust-registry-${username}.db"
+}
+
+# Check if user exists in system registry
+user_exists() {
+    local username="$1"
+    local admin_db=$(get_user_db "admin")
+    
+    [ ! -f "$admin_db" ] && return 1
+    
+    local count=$(sqlite3 "$admin_db" \
+        "SELECT COUNT(*) FROM users WHERE username = '$username'" 2>/dev/null || echo "0")
+    
+    [ "$count" -gt 0 ]
+}
+
+# Add new user
+user_add() {
+    local username=""
+    local email=""
+    local role="read-only"
+    local contact_email=""
+    
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --email)
+                email="$2"
+                shift 2
+                ;;
+            --role)
+                role="$2"
+                shift 2
+                ;;
+            --contact)
+                contact_email="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet user add <username> --email <email> [options]
+
+Add a new user to the BobNet trust registry system.
+
+OPTIONS:
+  --email <email>     User email address (required)
+  --role <role>       User role (default: read-only)
+                      Roles: owner, family, delegate, read-only
+  --contact <email>   Link to existing contact
+
+EXAMPLES:
+  bobnet user add penny --email penny@buildzero.tech --role family
+  bobnet user add olivia --email olivia@buildzero.tech --role delegate
+  
+After adding a user, initialize their trust registry:
+  bobnet trust init --user <username>
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$username" ]; then
+                    username="$1"
+                else
+                    error "Unknown argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    # Validate inputs
+    if [ -z "$username" ] || [ -z "$email" ]; then
+        error "Username and email are required. Run 'bobnet user add --help' for usage."
+    fi
+    
+    # Validate role
+    case "$role" in
+        owner|family|delegate|read-only) ;;
+        *)
+            error "Invalid role '$role'. Valid roles: owner, family, delegate, read-only"
+            ;;
+    esac
+    
+    # Get admin database (system-wide user registry)
+    local admin_db=$(get_user_db "admin")
+    local config_dir="${BOBNET_CONFIG_DIR:-$HOME/.bobnet/config}"
+    mkdir -p "$config_dir"
+    
+    # Initialize admin database if needed
+    if [ ! -f "$admin_db" ]; then
+        echo "Initializing system user registry..."
+        local schema_file="$BOBNET_ROOT/scripts/sql/trust-registry-schema.sql"
+        sqlite3 "$admin_db" < "$schema_file"
+        
+        # Apply Phase 4 migration
+        local migration_file="$BOBNET_ROOT/scripts/sql/migrate-users-phase4.sql"
+        if [ -f "$migration_file" ]; then
+            sqlite3 "$admin_db" < "$migration_file" 2>/dev/null || {
+                warn "Phase 4 migration already applied or not needed"
+            }
+        fi
+    fi
+    
+    # Check if user already exists
+    if user_exists "$username"; then
+        error "User '$username' already exists"
+    fi
+    
+    # Find or create contact
+    local contact_id=""
+    if [ -n "$contact_email" ]; then
+        contact_id=$(sqlite3 "$admin_db" \
+            "SELECT id FROM contacts WHERE email = '$contact_email' LIMIT 1" 2>/dev/null || echo "")
+        
+        if [ -z "$contact_id" ]; then
+            # Create contact first
+            sqlite3 "$admin_db" <<EOF
+INSERT INTO contacts (email, name, trust_level, trust_score, created_at, updated_at)
+VALUES ('$contact_email', '$username', 'owner', 1.0, strftime('%s', 'now'), strftime('%s', 'now'));
+EOF
+            contact_id=$(sqlite3 "$admin_db" "SELECT last_insert_rowid()")
+        fi
+    fi
+    
+    # Add user
+    if [ -n "$contact_id" ]; then
+        sqlite3 "$admin_db" <<EOF
+INSERT INTO users (username, email, role, contact_id, created_at, active)
+VALUES ('$username', '$email', '$role', $contact_id, strftime('%s', 'now'), 1);
+EOF
+    else
+        sqlite3 "$admin_db" <<EOF
+INSERT INTO users (username, email, role, created_at, active)
+VALUES ('$username', '$email', '$role', strftime('%s', 'now'), 1);
+EOF
+    fi
+    
+    echo "✓ User added: $username ($email)"
+    echo "  Role: $role"
+    [ -n "$contact_id" ] && echo "  Contact ID: $contact_id"
+    
+    # Initialize user's personal trust registry
+    local user_db=$(get_user_db "$username")
+    if [ ! -f "$user_db" ]; then
+        echo "Initializing trust registry for $username..."
+        local schema_file="$BOBNET_ROOT/scripts/sql/trust-registry-schema.sql"
+        sqlite3 "$user_db" < "$schema_file"
+        echo "✓ Trust registry created: $user_db"
+    fi
+}
+
+# List users
+user_list() {
+    local show_inactive=false
+    
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --all|-a)
+                show_inactive=true
+                shift
+                ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet user list [options]
+
+List all users in the system.
+
+OPTIONS:
+  --all, -a           Include inactive users
+
+EXAMPLES:
+  bobnet user list
+  bobnet user list --all
+EOF
+                return 0
+                ;;
+            *)
+                error "Unknown argument: $1"
+                ;;
+        esac
+    done
+    
+    local admin_db=$(get_user_db "admin")
+    
+    if [ ! -f "$admin_db" ]; then
+        echo "No users registered"
+        return 0
+    fi
+    
+    local where_clause="WHERE active = 1"
+    if [ "$show_inactive" = true ]; then
+        where_clause=""
+    fi
+    
+    echo "Users:"
+    echo "------"
+    
+    sqlite3 "$admin_db" <<EOF | column -t -s '|'
+.mode list
+.separator '|'
+SELECT 
+  username,
+  email,
+  role,
+  CASE WHEN active = 1 THEN 'active' ELSE 'inactive' END as status
+FROM users
+$where_clause
+ORDER BY created_at;
+EOF
+}
+
+# Show user details
+user_show() {
+    local username="${1:-}"
+    
+    if [ -z "$username" ]; then
+        cat <<'EOF'
+USAGE: bobnet user show <username>
+
+Show detailed information about a user.
+
+EXAMPLES:
+  bobnet user show penny
+  bobnet user show olivia
+EOF
+        return 1
+    fi
+    
+    local admin_db=$(get_user_db "admin")
+    
+    if [ ! -f "$admin_db" ]; then
+        error "No users registered"
+    fi
+    
+    local user_data=$(sqlite3 "$admin_db" <<EOF
+SELECT 
+  u.username,
+  u.email,
+  u.role,
+  u.active,
+  u.created_at,
+  u.deactivated_at,
+  COALESCE(c.email, '') as contact_email,
+  COALESCE(c.trust_score, 0) as trust_score
+FROM users u
+LEFT JOIN contacts c ON u.contact_id = c.id
+WHERE u.username = '$username';
+EOF
+)
+    
+    if [ -z "$user_data" ]; then
+        error "User '$username' not found"
+    fi
+    
+    local IFS='|'
+    read -r user email role active created_at deactivated_at contact_email trust_score <<< "$user_data"
+    
+    echo "User: $user"
+    echo "Email: $email"
+    echo "Role: $role"
+    echo "Status: $([ "$active" = "1" ] && echo "active" || echo "inactive")"
+    echo "Created: $(date -r "$created_at" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$created_at")"
+    [ -n "$deactivated_at" ] && [ "$deactivated_at" != "0" ] && \
+        echo "Deactivated: $(date -r "$deactivated_at" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$deactivated_at")"
+    [ -n "$contact_email" ] && [ "$contact_email" != "" ] && \
+        echo "Contact: $contact_email (trust: $trust_score)"
+    
+    # Show bound agents
+    echo ""
+    echo "Bound Agents:"
+    sqlite3 "$admin_db" <<EOF | sed 's/^/  - /'
+SELECT agent_id FROM agent_bindings 
+WHERE user_id = (SELECT id FROM users WHERE username = '$username')
+ORDER BY created_at;
+EOF
+}
+
+# Bind agent to user
+user_bind_agent() {
+    local agent_id=""
+    local username=""
+    
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet user bind-agent <agent-id> <username>
+
+Bind an OpenClaw agent to a user account.
+
+ARGUMENTS:
+  agent-id            Agent identifier (e.g., bob, family, olivia)
+  username            Username to bind agent to
+
+EXAMPLES:
+  bobnet user bind-agent bob james
+  bobnet user bind-agent olivia penny
+  bobnet user bind-agent family james
+EOF
+                return 0
+                ;;
+            *)
+                if [ -z "$agent_id" ]; then
+                    agent_id="$1"
+                elif [ -z "$username" ]; then
+                    username="$1"
+                else
+                    error "Too many arguments"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$agent_id" ] || [ -z "$username" ]; then
+        error "Agent ID and username are required. Run 'bobnet user bind-agent --help' for usage."
+    fi
+    
+    local admin_db=$(get_user_db "admin")
+    
+    if [ ! -f "$admin_db" ]; then
+        error "No users registered"
+    fi
+    
+    # Check if user exists
+    local user_id=$(sqlite3 "$admin_db" \
+        "SELECT id FROM users WHERE username = '$username'" 2>/dev/null || echo "")
+    
+    if [ -z "$user_id" ]; then
+        error "User '$username' not found"
+    fi
+    
+    # Check if binding already exists
+    local existing=$(sqlite3 "$admin_db" \
+        "SELECT COUNT(*) FROM agent_bindings WHERE user_id = $user_id AND agent_id = '$agent_id'")
+    
+    if [ "$existing" -gt 0 ]; then
+        echo "✓ Agent '$agent_id' already bound to user '$username'"
+        return 0
+    fi
+    
+    # Add binding
+    sqlite3 "$admin_db" <<EOF
+INSERT INTO agent_bindings (user_id, agent_id, created_at)
+VALUES ($user_id, '$agent_id', strftime('%s', 'now'));
+EOF
+    
+    echo "✓ Bound agent '$agent_id' to user '$username'"
+}
+
+# Deactivate user
+user_deactivate() {
+    local username="${1:-}"
+    
+    if [ -z "$username" ]; then
+        cat <<'EOF'
+USAGE: bobnet user deactivate <username>
+
+Deactivate a user account. This preserves their trust registry
+but prevents authentication.
+
+EXAMPLES:
+  bobnet user deactivate penny
+  
+To reactivate, use: UPDATE users SET active=1, deactivated_at=NULL WHERE username='...';
+EOF
+        return 1
+    fi
+    
+    local admin_db=$(get_user_db "admin")
+    
+    if [ ! -f "$admin_db" ]; then
+        error "No users registered"
+    fi
+    
+    # Check if user exists
+    if ! user_exists "$username"; then
+        error "User '$username' not found"
+    fi
+    
+    # Deactivate user
+    sqlite3 "$admin_db" <<EOF
+UPDATE users
+SET active = 0,
+    deactivated_at = strftime('%s', 'now')
+WHERE username = '$username';
+EOF
+    
+    echo "✓ User '$username' deactivated"
+    echo "  Trust registry preserved at: $(get_user_db "$username")"
+}
+
+# Permission check function (used by other commands)
+check_permission() {
+    local operation="$1"
+    local user="${2:-$(get_current_user)}"
+    
+    local admin_db=$(get_user_db "admin")
+    
+    if [ ! -f "$admin_db" ]; then
+        # No RBAC system initialized, allow all (backward compatibility)
+        return 0
+    fi
+    
+    # Get user role
+    local role=$(sqlite3 "$admin_db" \
+        "SELECT role FROM users WHERE username = '$user' AND active = 1" 2>/dev/null || echo "")
+    
+    if [ -z "$role" ]; then
+        # User not in system - default to read-only
+        role="read-only"
+    fi
+    
+    # Check permission matrix
+    case "$role:$operation" in
+        # Owner has all permissions
+        owner:*)
+            return 0
+            ;;
+        
+        # Family permissions
+        family:contact_add|\
+        family:contact_view|\
+        family:contact_archive|\
+        family:contact_restore|\
+        family:contact_set_trust|\
+        family:email_send|\
+        family:email_draft|\
+        family:email_approve|\
+        family:audit_view_own|\
+        family:sync_google)
+            return 0
+            ;;
+        
+        # Delegate permissions
+        delegate:email_send|\
+        delegate:email_draft|\
+        delegate:contact_view|\
+        delegate:audit_view_own)
+            return 0
+            ;;
+        
+        # Read-only permissions
+        read-only:contact_view|\
+        read-only:audit_view_own|\
+        read-only:user_list)
+            return 0
+            ;;
+        
+        # Denied
+        *)
+            error "Permission denied - $operation requires different role (current: $role)"
+            ;;
+    esac
+}
 
 cmd_restart() {
     # Parse arguments
@@ -6669,6 +7202,7 @@ bobnet_main() {
         lock) cmd_lock ;;
         update) cmd_update ;;
         trust) shift; cmd_trust "$@" ;;
+        user) shift; cmd_user "$@" ;;
         restart) shift; cmd_restart "$@" ;;
         upgrade) shift; cmd_upgrade "$@" ;;
         help|--help|-h) cmd_help ;;
