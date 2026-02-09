@@ -1029,6 +1029,36 @@ EOF
         fi
     fi
     
+    # 5. Check skills
+    local skills=$(jq -c '.skills // {}' "$BOBNET_SCHEMA" 2>/dev/null)
+    if [[ "$skills" != "{}" && "$skills" != "null" ]]; then
+        echo ""
+        echo "--- Skills ---"
+        
+        local schema_dirs=$(echo "$skills" | jq -r '.extraDirs // [] | .[]' 2>/dev/null)
+        local live_dirs=$($claw config get skills.load.extraDirs 2>/dev/null | jq -r '.[]' 2>/dev/null || echo "")
+        
+        local skills_match=true
+        for dir in $schema_dirs; do
+            # Expand ~ for comparison
+            local expanded="${dir/#\~/$HOME}"
+            if ! echo "$live_dirs" | grep -qF "$expanded"; then
+                skills_match=false
+                break
+            fi
+        done
+        
+        if [[ "$skills_match" == "true" && -n "$schema_dirs" ]]; then
+            local count=$(echo "$schema_dirs" | wc -l | tr -d ' ')
+            success "skills.extraDirs in sync ($count dirs)"
+        else
+            echo "  skills.extraDirs:"
+            echo "    schema: $(echo "$schema_dirs" | tr '\n' ' ')"
+            echo "    live:   $(echo "$live_dirs" | tr '\n' ' ')"
+            changes+=("skills: extraDirs drift")
+        fi
+    fi
+    
     echo ""
     
     # Safety check: refuse to wipe everything
@@ -1128,6 +1158,31 @@ EOF
             # Build hooks config
             local hooks_config="{\"internal\":{\"enabled\":true,\"entries\":{\"session-memory\":{\"enabled\":$sm_enabled,\"env\":{\"messages\":\"$sm_messages\"}}}}}"
             $claw config set hooks "$hooks_config" --json && success "session-memory hook applied (messages: $sm_messages)"
+        fi
+    fi
+    
+    # Apply skills (extraDirs)
+    local skills=$(jq -c '.skills // {}' "$BOBNET_SCHEMA" 2>/dev/null)
+    if [[ "$skills" != "{}" && "$skills" != "null" ]]; then
+        echo ""
+        echo "--- Skills ---"
+        
+        local schema_dirs=$(echo "$skills" | jq -r '.extraDirs // [] | .[]' 2>/dev/null)
+        if [[ -n "$schema_dirs" ]]; then
+            # Build JSON array with expanded paths
+            local dirs_json='['
+            local first=true
+            while IFS= read -r dir; do
+                [[ -z "$dir" ]] && continue
+                # Expand ~ to absolute path
+                local expanded="${dir/#\~/$HOME}"
+                $first || dirs_json+=','
+                first=false
+                dirs_json+="\"$expanded\""
+            done <<< "$schema_dirs"
+            dirs_json+=']'
+            
+            $claw config set skills.load.extraDirs "$dirs_json" --json && success "skills.extraDirs applied"
         fi
     fi
     
