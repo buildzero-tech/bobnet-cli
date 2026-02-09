@@ -5228,8 +5228,51 @@ EOF
     fi
     
     # Add work-started comment
-    local timestamp=$(date -u +"%Y-%m-%d %H:%M UTC")
+    local timestamp=$(date -u +"%Y-%m-d %H:%M UTC")
     gh issue comment "$issue_num" --repo "$repo" --body "🚧 Work started by @$current_user ($timestamp)"
+    
+    # Validate Epic field for BobNet repos
+    if [[ "$repo" =~ ^buildzero-tech/(bobnet-cli|ultima-thule)$ ]]; then
+        local project_id=$(get_project_id "buildzero-tech" "4")
+        if [[ -n "$project_id" ]]; then
+            local issue_node_id=$(get_issue_node_id "$repo" "$issue_num")
+            if [[ -n "$issue_node_id" ]]; then
+                # Query for project item and Epic field
+                local epic_value=$(gh api graphql -f query='
+                    query($org: String!, $number: Int!) {
+                        organization(login: $org) {
+                            projectV2(number: $number) {
+                                items(first: 100) {
+                                    nodes {
+                                        id
+                                        content {
+                                            ... on Issue {
+                                                number
+                                                repository {
+                                                    nameWithOwner
+                                                }
+                                            }
+                                        }
+                                        fieldValueByName(name: "Epic") {
+                                            ... on ProjectV2ItemFieldSingleSelectValue {
+                                                name
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ' -f org="buildzero-tech" -F number=4 --jq ".data.organization.projectV2.items.nodes[] | select(.content.repository.nameWithOwner == \"$repo\" and .content.number == $issue_num) | .fieldValueByName.name // empty" 2>/dev/null)
+                
+                if [[ -z "$epic_value" ]]; then
+                    warn "Epic field not set - consider setting it via GitHub Project UI"
+                else
+                    success "Epic: $epic_value"
+                fi
+            fi
+        fi
+    fi
     
     # TODO: Update GitHub Project status to "In Progress" (needs project API integration)
     # For now, just note it
