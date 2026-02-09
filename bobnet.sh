@@ -1002,6 +1002,32 @@ EOF
         changes+=("bindings: $schema_count (schema) vs $config_count (live)")
     fi
     
+    # 4. Check preferences
+    local prefs=$(jq -c '.preferences // {}' "$BOBNET_SCHEMA" 2>/dev/null)
+    if [[ "$prefs" != "{}" && "$prefs" != "null" ]]; then
+        echo ""
+        echo "--- Preferences ---"
+        
+        # Session memory hook
+        local session_memory=$(echo "$prefs" | jq -c '.sessionMemory // null')
+        if [[ "$session_memory" != "null" ]]; then
+            local schema_enabled=$(echo "$session_memory" | jq -r '.enabled // true')
+            local schema_messages=$(echo "$session_memory" | jq -r '.messageCount // 15')
+            
+            local live_enabled=$($claw config get hooks.internal.entries.session-memory.enabled 2>/dev/null || echo "null")
+            local live_messages=$($claw config get hooks.internal.entries.session-memory.env.messages 2>/dev/null | tr -d '"' || echo "15")
+            
+            if [[ "$schema_enabled" == "$live_enabled" && "$schema_messages" == "$live_messages" ]]; then
+                success "session-memory in sync (messages: $schema_messages)"
+            else
+                echo "  session-memory:"
+                echo "    schema: enabled=$schema_enabled, messages=$schema_messages"
+                echo "    live:   enabled=$live_enabled, messages=$live_messages"
+                changes+=("preferences: session-memory drift")
+            fi
+        fi
+    fi
+    
     echo ""
     
     # Safety check: refuse to wipe everything
@@ -1086,9 +1112,37 @@ EOF
     local bindings=$(jq -c '[.bindings[] | {agentId, match: {channel, peer: {kind: (if .groupId then "group" else "dm" end), id: (.groupId // .dmId)}}}]' "$BOBNET_SCHEMA" 2>/dev/null || echo '[]')
     $claw config set bindings "$bindings" --json && success "bindings applied"
     
+    # Apply preferences (maps to OpenClaw hooks config)
+    local prefs=$(jq -c '.preferences // {}' "$BOBNET_SCHEMA" 2>/dev/null)
+    if [[ "$prefs" != "{}" && "$prefs" != "null" ]]; then
+        echo ""
+        echo "--- Preferences ---"
+        
+        # Session memory hook
+        local session_memory=$(echo "$prefs" | jq -c '.sessionMemory // null')
+        if [[ "$session_memory" != "null" ]]; then
+            local sm_enabled=$(echo "$session_memory" | jq -r '.enabled // true')
+            local sm_messages=$(echo "$session_memory" | jq -r '.messageCount // 15')
+            
+            # Build hooks config
+            local hooks_config="{\"internal\":{\"enabled\":true,\"entries\":{\"session-memory\":{\"enabled\":$sm_enabled,\"env\":{\"messages\":\"$sm_messages\"}}}}}"
+            $claw config set hooks "$hooks_config" --json && success "session-memory hook applied (messages: $sm_messages)"
+        fi
+    fi
+    
     echo ""
-    success "Sync complete - restart gateway to apply"
-    echo "  $claw gateway restart"
+    echo "Restarting gateway to apply changes..."
+    
+    # Send SIGUSR1 to running gateway for hot reload
+    local gw_pid=$(pgrep -f "openclaw gateway" 2>/dev/null | head -1)
+    if [[ -n "$gw_pid" ]]; then
+        kill -USR1 "$gw_pid" 2>/dev/null && success "Gateway reload triggered (pid $gw_pid)"
+    else
+        warn "Gateway not running - start with: $claw gateway"
+    fi
+    
+    echo ""
+    success "Sync complete"
 }
 
 cmd_unlock() {
