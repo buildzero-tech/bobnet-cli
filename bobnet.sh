@@ -62,6 +62,7 @@ check_agents_symlink() {
 # Global variables and utilities
 BOBNET_ROOT="${BOBNET_ROOT:-$HOME/.bobnet/ultima-thule}"
 BOBNET_SCHEMA="$BOBNET_ROOT/config/bobnet.json"
+BOBNET_CACHE_DIR="${BOBNET_CACHE_DIR:-$HOME/.bobnet/cache}"
 
 # Schema helper functions
 get_all_agents() {
@@ -3582,6 +3583,9 @@ EOF
         my-issues)
             cmd_github_my_issues "$@"
             ;;
+        project)
+            cmd_github_project "$@"
+            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet github <command> [subcommand] [options]
@@ -3589,15 +3593,20 @@ Usage: bobnet github <command> [subcommand] [options]
 GitHub integration commands for project tracking.
 
 COMMANDS:
-  issue create        Create a new GitHub issue
-  issue link          Link commits to issues
-  milestone status    Query milestone progress
-  my-issues           Show assigned issues grouped by type
+  issue create              Create a new GitHub issue
+  issue link                Link commits to issues
+  milestone status          Query milestone progress
+  my-issues                 Show assigned issues grouped by type
+  project set-status        Set issue status in project
+  project set-priority      Set issue priority in project
+  project refresh           Refresh cached project metadata
 
 EXAMPLES:
   bobnet github issue create "Feature: Add SSO" --label enhancement
   bobnet github milestone status "Q1 2026"
   bobnet github my-issues
+  bobnet github project set-status 123 in-progress
+  bobnet github project set-priority 123 high
 
 See 'bobnet github <command> help' for more information on a specific command.
 EOF
@@ -4034,6 +4043,395 @@ add_issue_to_project_with_epic() {
         ' -f projectId="$project_id" -f itemId="$item_id" -f fieldId="$field_id" -f optionId="$option_id" >/dev/null 2>&1
         
         return 0
+    fi
+}
+
+# Project metadata caching
+get_project_cache_path() {
+    local org="$1"
+    local project_num="$2"
+    echo "$BOBNET_CACHE_DIR/github-projects/${org}-${project_num}.json"
+}
+
+get_cached_project_metadata() {
+    local org="$1"
+    local project_num="$2"
+    local cache_file=$(get_project_cache_path "$org" "$project_num")
+    
+    if [[ -f "$cache_file" ]]; then
+        # Check if cache is recent (less than 24 hours old)
+        local now=$(date +%s)
+        local cache_time
+        if [[ "$(uname)" == "Darwin" ]]; then
+            cache_time=$(stat -f %m "$cache_file" 2>/dev/null)
+        else
+            cache_time=$(stat -c %Y "$cache_file" 2>/dev/null)
+        fi
+        local cache_age=$((now - cache_time))
+        if [[ "$cache_age" -lt 86400 ]]; then
+            cat "$cache_file"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+cache_project_metadata() {
+    local org="$1"
+    local project_num="$2"
+    local metadata="$3"
+    local cache_file=$(get_project_cache_path "$org" "$project_num")
+    
+    mkdir -p "$(dirname "$cache_file")"
+    
+    # Atomic write
+    local tmp_file=$(mktemp)
+    echo "$metadata" | jq --arg cached_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+        '. + {cached_at: $cached_at}' > "$tmp_file"
+    mv "$tmp_file" "$cache_file"
+}
+
+invalidate_project_cache() {
+    local org="$1"
+    local project_num="$2"
+    local cache_file=$(get_project_cache_path "$org" "$project_num")
+    
+    if [[ -f "$cache_file" ]]; then
+        rm "$cache_file"
+        info "Cache invalidated, refetching..."
+    fi
+}
+
+fetch_project_metadata() {
+    local org="$1"
+    local project_num="$2"
+    local force_refresh="${3:-false}"
+    
+    # Try cache first (unless force refresh)
+    if [[ "$force_refresh" != "true" ]]; then
+        local cached=$(get_cached_project_metadata "$org" "$project_num")
+        if [[ -n "$cached" ]]; then
+            echo "$cached"
+            return 0
+        fi
+    fi
+    
+    # Fetch from API
+    local metadata=$(gh api graphql -f query='
+        query($org: String!, $number: Int!) {
+            organization(login: $org) {
+                projectV2(number: $number) {
+                    id
+                    title
+                    fields(first: 20) {
+                        nodes {
+                            ... on ProjectV2Field {
+                                id
+                                name
+                                dataType
+                            }
+                            ... on ProjectV2SingleSelectField {
+                                id
+                                name
+                                dataType
+                                options {
+                                    id
+                                    name
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ' -f org="$org" -F number="$project_num" --jq '.data.organization.projectV2' 2>/dev/null)
+    
+    if [[ -z "$metadata" ]] || [[ "$metadata" == "null" ]]; then
+        error "Failed to fetch project metadata for $org/$project_num"
+        return 1
+    fi
+    
+    # Cache the result
+    cache_project_metadata "$org" "$project_num" "$metadata"
+    
+    echo "$metadata"
+}
+
+get_project_item_id() {
+    local org="$1"
+    local project_num="$2"
+    local repo="$3"
+    local issue_num="$4"
+    
+    local project_id=$(get_project_id "$org" "$project_num")
+    [[ -z "$project_id" ]] && return 1
+    
+    # Query for the item ID
+    gh api graphql -f query='
+        query($projectId: ID!, $repo: String!, $issueNum: Int!) {
+            node(id: $projectId) {
+                ... on ProjectV2 {
+                    items(first: 100) {
+                        nodes {
+                            id
+                            content {
+                                ... on Issue {
+                                    number
+                                    repository {
+                                        name
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ' -f projectId="$project_id" -f repo="$repo" -F issueNum="$issue_num" \
+        --jq ".data.node.items.nodes[] | select(.content.number == $issue_num and .content.repository.name == \"$repo\") | .id" 2>/dev/null | head -1
+}
+
+infer_project_from_repo() {
+    local repo="$1"
+    
+    case "$repo" in
+        buildzero-tech/bobnet-cli|buildzero-tech/ultima-thule)
+            echo "buildzero-tech/4"
+            ;;
+        *)
+            # Default to BobNet Work project
+            echo "buildzero-tech/4"
+            ;;
+    esac
+}
+
+set_project_field_value() {
+    local org="$1"
+    local project_num="$2"
+    local repo="$3"
+    local issue_num="$4"
+    local field_name="$5"
+    local field_value="$6"
+    
+    # Get project metadata (cached)
+    local metadata=$(fetch_project_metadata "$org" "$project_num")
+    [[ -z "$metadata" ]] && return 1
+    
+    local project_id=$(echo "$metadata" | jq -r '.id')
+    
+    # Get field ID and option ID
+    local field_data=$(echo "$metadata" | jq -r --arg name "$field_name" '.fields.nodes[] | select(.name == $name)')
+    [[ -z "$field_data" ]] && { error "Field '$field_name' not found in project"; return 1; }
+    
+    local field_id=$(echo "$field_data" | jq -r '.id')
+    local option_id=$(echo "$field_data" | jq -r --arg val "$field_value" '.options[]? | select(.name == $val) | .id')
+    
+    if [[ -z "$option_id" ]]; then
+        error "Value '$field_value' not found for field '$field_name'"
+        echo "Valid values: $(echo "$field_data" | jq -r '.options[].name' | tr '\n' ', ' | sed 's/,$//')" >&2
+        return 1
+    fi
+    
+    # Get project item ID
+    local item_id=$(get_project_item_id "$org" "$project_num" "$repo" "$issue_num")
+    if [[ -z "$item_id" ]]; then
+        error "Issue #$issue_num not found in project $org/$project_num"
+        return 1
+    fi
+    
+    # Set field value
+    local result=$(gh api graphql -f query='
+        mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+            updateProjectV2ItemFieldValue(
+                input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { singleSelectOptionId: $optionId }
+                }
+            ) {
+                projectV2Item {
+                    id
+                }
+            }
+        }
+    ' -f projectId="$project_id" -f itemId="$item_id" -f fieldId="$field_id" -f optionId="$option_id" 2>&1)
+    
+    # Check for errors (stale cache)
+    if echo "$result" | jq -e '.errors[]?' >/dev/null 2>&1; then
+        local error_type=$(echo "$result" | jq -r '.errors[0].type // "UNKNOWN"')
+        if [[ "$error_type" == "NOT_FOUND" ]]; then
+            info "Field ID not found, cache may be stale - refreshing..."
+            invalidate_project_cache "$org" "$project_num"
+            # Retry with fresh metadata
+            set_project_field_value "$org" "$project_num" "$repo" "$issue_num" "$field_name" "$field_value"
+            return $?
+        fi
+        error "Failed to set field: $(echo "$result" | jq -r '.errors[0].message // "Unknown error"')"
+        return 1
+    fi
+    
+    return 0
+}
+
+cmd_github_project() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        set-status)
+            cmd_github_project_set_status "$@"
+            ;;
+        set-priority)
+            cmd_github_project_set_priority "$@"
+            ;;
+        refresh)
+            cmd_github_project_refresh "$@"
+            ;;
+        help|-h|--help)
+            cat <<'EOF'
+Usage: bobnet github project <command> [options]
+
+GitHub Project field management.
+
+COMMANDS:
+  set-status <issue> <status>     Set issue status (not-started, in-progress, review, done)
+  set-priority <issue> <priority> Set issue priority (low, medium, high, critical, waiting, deferred)
+  refresh [org/num]               Refresh cached project metadata
+
+EXAMPLES:
+  bobnet github project set-status 123 in-progress
+  bobnet github project set-status buildzero-tech/ultima-thule#45 done
+  bobnet github project set-priority 123 high
+  bobnet github project refresh buildzero-tech/4
+
+NOTES:
+  - Issue can be just a number (uses current repo) or full repo#num
+  - Project is inferred from repo (bobnet-cli → BobNet Work)
+  - Metadata is cached for 24 hours, use 'refresh' to update
+
+See 'bobnet github project <command> help' for more information.
+EOF
+            ;;
+        *)
+            error "Unknown project command: $subcmd (try 'bobnet github project help')"
+            ;;
+    esac
+}
+
+cmd_github_project_set_status() {
+    local issue="$1"
+    local status="$2"
+    
+    [[ -z "$issue" ]] && { error "Usage: bobnet github project set-status <issue> <status>"; return 1; }
+    [[ -z "$status" ]] && { error "Usage: bobnet github project set-status <issue> <status>"; return 1; }
+    
+    # Normalize status value
+    case "$status" in
+        not-started|"not started"|notstarted) status="Not Started" ;;
+        in-progress|"in progress"|inprogress|started) status="In Progress" ;;
+        review|reviewing) status="Review" ;;
+        done|complete|completed|closed) status="Done" ;;
+        *) 
+            error "Invalid status: $status"
+            echo "  Valid: not-started, in-progress, review, done" >&2
+            return 1
+            ;;
+    esac
+    
+    # Parse issue reference
+    local repo issue_num
+    if [[ "$issue" == *"#"* ]]; then
+        repo="${issue%#*}"
+        issue_num="${issue#*#}"
+    elif [[ "$issue" == *"/"* ]]; then
+        # Format: repo/num
+        repo="${issue%/*}"
+        issue_num="${issue#*/}"
+    else
+        # Just a number, infer repo from git
+        issue_num="$issue"
+        repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+        [[ -z "$repo" ]] && repo="buildzero-tech/bobnet-cli"
+    fi
+    
+    # Get just the repo name (not full path) for project item lookup
+    local repo_name="${repo#*/}"
+    
+    # Infer project
+    local project=$(infer_project_from_repo "$repo")
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    # Set field value
+    if set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Status" "$status"; then
+        info "Status set to '$status' for $repo#$issue_num"
+    else
+        return 1
+    fi
+}
+
+cmd_github_project_set_priority() {
+    local issue="$1"
+    local priority="$2"
+    
+    [[ -z "$issue" ]] && { error "Usage: bobnet github project set-priority <issue> <priority>"; return 1; }
+    [[ -z "$priority" ]] && { error "Usage: bobnet github project set-priority <issue> <priority>"; return 1; }
+    
+    # Normalize priority value
+    case "$priority" in
+        low|l) priority="Low" ;;
+        medium|med|m) priority="Medium" ;;
+        high|h) priority="High" ;;
+        critical|crit|c) priority="Critical" ;;
+        waiting|wait|w|blocked) priority="Waiting" ;;
+        deferred|defer|d) priority="Deferred" ;;
+        *) 
+            error "Invalid priority: $priority"
+            echo "  Valid: low, medium, high, critical, waiting, deferred" >&2
+            return 1
+            ;;
+    esac
+    
+    # Parse issue reference (same logic as set-status)
+    local repo issue_num
+    if [[ "$issue" == *"#"* ]]; then
+        repo="${issue%#*}"
+        issue_num="${issue#*#}"
+    elif [[ "$issue" == *"/"* ]]; then
+        repo="${issue%/*}"
+        issue_num="${issue#*/}"
+    else
+        issue_num="$issue"
+        repo=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+        [[ -z "$repo" ]] && repo="buildzero-tech/bobnet-cli"
+    fi
+    
+    local repo_name="${repo#*/}"
+    local project=$(infer_project_from_repo "$repo")
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    if set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Priority" "$priority"; then
+        info "Priority set to '$priority' for $repo#$issue_num"
+    else
+        return 1
+    fi
+}
+
+cmd_github_project_refresh() {
+    local project="${1:-buildzero-tech/4}"
+    
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    invalidate_project_cache "$org" "$project_num"
+    
+    if fetch_project_metadata "$org" "$project_num" "true" >/dev/null; then
+        info "Project metadata refreshed for $project"
+    else
+        error "Failed to refresh project metadata"
+        return 1
     fi
 }
 
@@ -5172,6 +5570,9 @@ cmd_work() {
         done)
             cmd_work_done "$@"
             ;;
+        blocked)
+            cmd_work_blocked "$@"
+            ;;
         help|-h|--help)
             cat <<'EOF'
 Usage: bobnet work <command> [options]
@@ -5179,12 +5580,14 @@ Usage: bobnet work <command> [options]
 Work tracking commands for managing GitHub issues and project boards.
 
 COMMANDS:
-  start <issue>          Mark issue as "In Progress" and assign to self
-  done <issue>           Mark issue as "Done" and close with commit references
+  start <issue>              Mark issue as "In Progress" and assign to self
+  done <issue>               Mark issue as "Done" and close with commit references
+  blocked <issue> <reason>   Mark issue as blocked (Priority: Waiting + blocked label)
 
 EXAMPLES:
   bobnet work start 37
   bobnet work done 37
+  bobnet work blocked 37 "Waiting for API access from vendor"
 
 See 'bobnet work <command> help' for more information.
 EOF
@@ -5329,9 +5732,24 @@ EOF
         fi
     fi
     
-    # TODO: Update GitHub Project status to "In Progress" (needs project API integration)
-    # For now, just note it
-    warn "Project status update not yet implemented - manually update on GitHub if needed"
+    # Update GitHub Project status to "In Progress"
+    local repo_name="${repo#*/}"
+    local project=$(infer_project_from_repo "$repo")
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    if set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Status" "In Progress" 2>/dev/null; then
+        success "Status set to 'In Progress'"
+    fi
+    
+    # Remove "blocked" label if present (unblocking)
+    local has_blocked=$(gh issue view "$issue_num" --repo "$repo" --json labels -q '.labels[].name' 2>/dev/null | grep -q "^blocked$" && echo "yes")
+    if [[ "$has_blocked" == "yes" ]]; then
+        gh issue edit "$issue_num" --repo "$repo" --remove-label "blocked" 2>/dev/null
+        # Restore priority to Medium (or original - but we don't track that, so Medium is safe default)
+        set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Priority" "Medium" 2>/dev/null || true
+        success "Removed 'blocked' label"
+    fi
     
     echo ""
     success "Work started on $repo#$issue_num"
@@ -5443,7 +5861,15 @@ EOF
         done <<< "$commits"
     fi
     
-    # TODO: Update GitHub Project status to "Done" (needs project API integration)
+    # Update GitHub Project status to "Done"
+    local repo_name="${repo#*/}"
+    local project=$(infer_project_from_repo "$repo")
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    if set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Status" "Done" 2>/dev/null; then
+        success "Status set to 'Done'"
+    fi
     
     # Close issue with commit summary
     info "Closing issue..."
@@ -5458,6 +5884,102 @@ EOF
         echo "  - Update MEMORY.md: Mark todo [x] completed"
         echo "  - Run: bobnet todo sync (to sync with GitHub)"
     fi
+}
+
+cmd_work_blocked() {
+    local issue_num="" reason="" repo=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo|-R)
+                repo="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bobnet work blocked <issue> <reason> [options]
+
+Mark a GitHub issue as blocked with a reason.
+
+ACTIONS:
+  1. Sets Priority field to "Waiting" in GitHub Project
+  2. Adds "blocked" label to the issue
+  3. Posts a comment with the blocking reason
+
+OPTIONS:
+  --repo, -R <owner/repo>   Target repository (default: current repo)
+
+EXAMPLES:
+  bobnet work blocked 37 "Waiting for API access from vendor"
+  bobnet work blocked 37 "Depends on #38 being completed first"
+
+TO UNBLOCK:
+  bobnet work start <issue>  # Removes blocked label, restores priority
+EOF
+                return 0
+                ;;
+            *)
+                if [[ -z "$issue_num" ]]; then
+                    issue_num="$1"
+                    shift
+                elif [[ -z "$reason" ]]; then
+                    reason="$1"
+                    shift
+                else
+                    # Append additional words to reason
+                    reason="$reason $1"
+                    shift
+                fi
+                ;;
+        esac
+    done
+    
+    [[ -z "$issue_num" ]] && error "Issue number is required"
+    [[ -z "$reason" ]] && error "Blocking reason is required"
+    
+    # Detect current repo if not specified
+    if [[ -z "$repo" ]]; then
+        repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+        [[ -z "$repo" ]] && error "Not in a git repository. Use --repo to specify target."
+    fi
+    
+    local repo_name="${repo#*/}"
+    
+    info "Marking $repo#$issue_num as blocked..."
+    
+    # Validate issue exists
+    local issue_state=$(gh issue view "$issue_num" --repo "$repo" --json state -q .state 2>/dev/null)
+    [[ -z "$issue_state" ]] && error "Issue #$issue_num not found in $repo"
+    
+    # Ensure "blocked" label exists
+    if ! gh label list --repo "$repo" --json name -q '.[].name' | grep -q "^blocked$"; then
+        info "Creating 'blocked' label..."
+        gh label create "blocked" --repo "$repo" --color "B60205" --description "Work is blocked by external dependency" 2>/dev/null || true
+    fi
+    
+    # Add blocked label
+    gh issue edit "$issue_num" --repo "$repo" --add-label "blocked" 2>/dev/null
+    
+    # Set Priority to Waiting in project
+    local project=$(infer_project_from_repo "$repo")
+    local org="${project%/*}"
+    local project_num="${project#*/}"
+    
+    if set_project_field_value "$org" "$project_num" "$repo_name" "$issue_num" "Priority" "Waiting" 2>/dev/null; then
+        info "Priority set to 'Waiting'"
+    fi
+    
+    # Post blocking reason as comment
+    local comment="🚫 **Blocked**
+
+**Reason:** $reason
+
+*To unblock: \`bobnet work start $issue_num\`*"
+    
+    gh issue comment "$issue_num" --repo "$repo" --body "$comment" >/dev/null
+    
+    success "Issue #$issue_num marked as blocked"
+    echo "  Reason: $reason"
 }
 
 cmd_docs_release_notes() {

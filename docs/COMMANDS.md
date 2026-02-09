@@ -115,7 +115,8 @@ bobnet work start 37 --repo buildzero-tech/bobnet-cli
 **Notes:**
 - Auto-detects current repository from git remote
 - Adds timestamped comment: "🚧 Work started by @user (timestamp)"
-- GitHub Project status update not yet implemented (manual update needed)
+- Automatically sets GitHub Project Status to "In Progress"
+- If issue was blocked, removes "blocked" label and restores priority
 
 ---
 
@@ -168,7 +169,53 @@ bobnet work done 37 --repo buildzero-tech/bobnet-cli
 - Searches all branches for commits with `#<issue-num>` in message
 - Prompts for confirmation if no commits found
 - Closes with summary: "✅ Work completed" + commit list
-- GitHub Project status update not yet implemented (manual update needed)
+- Automatically sets GitHub Project Status to "Done"
+
+---
+
+### `bobnet work blocked`
+
+Mark a GitHub issue as blocked with a reason.
+
+**Usage:**
+```bash
+bobnet work blocked <issue> <reason> [options]
+```
+
+**Options:**
+- `--repo, -R <owner/repo>` — Target repository (default: current repo)
+
+**Actions:**
+1. Sets Priority field to "Waiting" in GitHub Project
+2. Adds "blocked" label to the issue
+3. Posts a comment with the blocking reason
+
+**Examples:**
+```bash
+# Mark issue as blocked with reason
+bobnet work blocked 37 "Waiting for API access from vendor"
+
+# Block with dependency reference
+bobnet work blocked 37 "Depends on #38 being completed first"
+```
+
+**Output:**
+```
+→ Marking buildzero-tech/bobnet-cli#37 as blocked...
+→ Priority set to 'Waiting'
+✓ Issue #37 marked as blocked
+  Reason: Waiting for API access from vendor
+```
+
+**To Unblock:**
+```bash
+bobnet work start <issue>  # Removes blocked label, restores priority to Medium
+```
+
+**Notes:**
+- Creates "blocked" label automatically if not exists
+- Label is bright red (#B60205) for visibility
+- `work start` removes blocked status and label
 
 ---
 
@@ -226,6 +273,99 @@ bobnet github my-issues --all
 - Only shows issues assigned to current GitHub user
 - Requires `gh` CLI authentication
 - Uses GitHub Search API (100 issue limit)
+
+---
+
+### `bobnet github project set-status`
+
+Set the Status field for an issue in the GitHub Project.
+
+**Usage:**
+```bash
+bobnet github project set-status <issue> <status>
+```
+
+**Status Values:**
+- `not-started` — Work not yet begun (default for new issues)
+- `in-progress` — Active development
+- `review` — Ready for review
+- `done` — Completed
+
+**Examples:**
+```bash
+# Set status in current repo
+bobnet github project set-status 87 in-progress
+
+# Set status with full issue reference
+bobnet github project set-status buildzero-tech/ultima-thule#45 done
+```
+
+**Notes:**
+- Project is inferred from repository (bobnet-cli, ultima-thule → BobNet Work)
+- Metadata is cached for 24 hours to reduce API calls
+- Use `bobnet github project refresh` to force cache update
+
+---
+
+### `bobnet github project set-priority`
+
+Set the Priority field for an issue in the GitHub Project.
+
+**Usage:**
+```bash
+bobnet github project set-priority <issue> <priority>
+```
+
+**Priority Values:**
+- `low` — Low priority, backlog
+- `medium` — Normal priority
+- `high` — High priority, do soon
+- `critical` — Must do immediately
+- `waiting` — Blocked, awaiting external input
+- `deferred` — Intentionally postponed
+
+**Examples:**
+```bash
+# Set priority
+bobnet github project set-priority 123 high
+
+# Mark as blocked (use work blocked instead for full workflow)
+bobnet github project set-priority 123 waiting
+```
+
+**Notes:**
+- Use `waiting` for blocked work (or use `bobnet work blocked` for full workflow)
+- Use `deferred` for work intentionally postponed
+- Priority changes don't affect issue labels
+
+**Waiting vs Deferred:**
+- **Waiting** — Blocked by external dependency (API access, vendor response, upstream issue)
+- **Deferred** — Intentionally postponed (low priority, needs design first, out of scope for now)
+
+---
+
+### `bobnet github project refresh`
+
+Refresh cached project metadata.
+
+**Usage:**
+```bash
+bobnet github project refresh [org/number]
+```
+
+**Examples:**
+```bash
+# Refresh BobNet Work project (default)
+bobnet github project refresh
+
+# Refresh specific project
+bobnet github project refresh buildzero-tech/4
+```
+
+**Notes:**
+- Cache expires after 24 hours automatically
+- Use when project fields/options have changed
+- Cache stored in `~/.bobnet/cache/github-projects/`
 
 ---
 
@@ -637,4 +777,4 @@ bobnet docs project-template > .github/project-template.md
 
 ---
 
-*Last updated: 2026-02-08*
+*Last updated: 2026-02-09*
