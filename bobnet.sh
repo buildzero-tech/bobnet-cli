@@ -2947,6 +2947,227 @@ trust_import() {
 }
 
 
+cmd_audit() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        log) audit_log "$@" ;;
+        query) audit_query "$@" ;;
+        export) audit_export "$@" ;;
+        -h|--help|help)
+            cat <<'EOF'
+USAGE: bobnet audit <command> [options]
+
+COMMANDS:
+  log <action>        Log an audit event
+  query               Query audit logs
+  export              Export audit logs
+
+Run 'bobnet audit <command> --help' for details.
+EOF
+            ;;
+        *) error "Unknown audit command: $subcmd" ;;
+    esac
+}
+
+audit_log() {
+    local action=""
+    local user="${BOBNET_USER:-$USER}"
+    local agent="${BOBNET_AGENT:-unknown}"
+    local channel="${BOBNET_CHANNEL:-cli}"
+    local subject=""
+    local result="success"
+    local metadata=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            --agent) agent="$2"; shift 2 ;;
+            --channel) channel="$2"; shift 2 ;;
+            --subject) subject="$2"; shift 2 ;;
+            --result) result="$2"; shift 2 ;;
+            --metadata) metadata="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet audit log <action> [OPTIONS]
+
+Log an audit event to JSONL audit log.
+
+OPTIONS:
+  --user <name>       User who performed action (default: $BOBNET_USER or $USER)
+  --agent <name>      Agent that executed (default: $BOBNET_AGENT or unknown)
+  --channel <name>    Channel used (default: $BOBNET_CHANNEL or cli)
+  --subject <text>    Subject of action (email, contact, etc.)
+  --result <status>   Result (success, failure, etc.)
+  --metadata <json>   Additional metadata as JSON
+
+EXAMPLES:
+  bobnet audit log email_sent --subject taylor@example.com --result success
+  bobnet audit log contact_archived --subject old@example.com
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$action" ]]; then
+                    action="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$action" ]] && error "Action required. Usage: bobnet audit log <action>"
+    
+    local log_dir="$BOBNET_ROOT/logs/audit"
+    local log_file="$log_dir/$(date +%Y-%m-%d).jsonl"
+    local lock_dir="/var/tmp/bobnet-audit.lock"
+    
+    mkdir -p "$log_dir"
+    
+    # Atomic write with mkdir-based lock (portable, works on macOS and Linux)
+    local max_attempts=50
+    local attempt=0
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+        attempt=$((attempt + 1))
+        if [[ $attempt -gt $max_attempts ]]; then
+            error "Failed to acquire audit log lock after $max_attempts attempts"
+        fi
+        sleep 0.1
+    done
+    
+    # Write log entry (compact JSON, one per line)
+    jq -cn \
+        --arg ts "$(date -u +%s)" \
+        --arg action "$action" \
+        --arg user "$user" \
+        --arg agent "$agent" \
+        --arg channel "$channel" \
+        --arg subject "$subject" \
+        --arg result "$result" \
+        --arg metadata "$metadata" \
+        '{
+            timestamp: ($ts | tonumber),
+            action: $action,
+            user: $user,
+            agent: $agent,
+            channel: $channel,
+            subject: $subject,
+            result: $result,
+            metadata: (if $metadata != "" then $metadata | fromjson else {} end)
+        }' >> "$log_file" || {
+        rmdir "$lock_dir"
+        error "Failed to write audit log"
+    }
+    
+    # Release lock
+    rmdir "$lock_dir"
+}
+
+audit_query() {
+    local since=""
+    local action=""
+    local subject=""
+    local result=""
+    local limit=100
+    local format="text"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --since) since="$2"; shift 2 ;;
+            --action) action="$2"; shift 2 ;;
+            --subject) subject="$2"; shift 2 ;;
+            --result) result="$2"; shift 2 ;;
+            --limit) limit="$2"; shift 2 ;;
+            --format) format="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet audit query [OPTIONS]
+
+Query audit logs (JSONL recent, SQLite archive).
+
+OPTIONS:
+  --since <time>      Query events since time (e.g., "1 hour ago", "2024-01-01")
+  --action <action>   Filter by action
+  --subject <text>    Filter by subject
+  --result <status>   Filter by result
+  --limit <n>         Limit results (default: 100)
+  --format <fmt>      Output format: text, json (default: text)
+
+EXAMPLES:
+  bobnet audit query --since "1 hour ago"
+  bobnet audit query --action email_sent --limit 10
+  bobnet audit query --subject taylor@example.com
+EOF
+                return 0 ;;
+            *) shift ;;
+        esac
+    done
+    
+    local log_dir="$BOBNET_ROOT/logs/audit"
+    local archive_db="$log_dir/archive.db"
+    
+    # Convert since to timestamp
+    local since_ts=0
+    if [[ -n "$since" ]]; then
+        since_ts=$(date -j -f "%Y-%m-%d %H:%M:%S" "$since" +%s 2>/dev/null || \
+                   date -j -v -${since// /} +%s 2>/dev/null || \
+                   echo 0)
+    fi
+    
+    local cutoff_ts=$(($(date +%s) - 7 * 86400))
+    local results=""
+    
+    # Query recent JSONL logs (<7 days)
+    if [[ $since_ts -gt $cutoff_ts || $since_ts -eq 0 ]]; then
+        for log_file in "$log_dir"/*.jsonl; do
+            [[ -f "$log_file" ]] || continue
+            
+            results+=$(jq -c \
+                --arg action "$action" \
+                --arg subject "$subject" \
+                --arg result "$result" \
+                --argjson since_ts "$since_ts" \
+                'select(
+                    .timestamp >= $since_ts and
+                    (.action == $action or $action == "") and
+                    (.subject == $subject or $subject == "") and
+                    (.result == $result or $result == "")
+                )' "$log_file" 2>/dev/null || true)
+            results+=$'\n'
+        done
+    fi
+    
+    # Query SQLite archive (>7 days) if it exists
+    if [[ -f "$archive_db" && ($since_ts -le $cutoff_ts || $since_ts -eq 0) ]]; then
+        local where_clauses=()
+        [[ $since_ts -gt 0 ]] && where_clauses+=("timestamp >= $since_ts")
+        [[ -n "$action" ]] && where_clauses+=("action = '$action'")
+        [[ -n "$subject" ]] && where_clauses+=("subject = '$subject'")
+        [[ -n "$result" ]] && where_clauses+=("result = '$result'")
+        
+        local where_sql=""
+        if [[ ${#where_clauses[@]} -gt 0 ]]; then
+            where_sql="WHERE $(IFS=' AND '; echo "${where_clauses[*]}")"
+        fi
+        
+        results+=$(sqlite3 "$archive_db" -json \
+            "SELECT * FROM audit_log $where_sql ORDER BY timestamp DESC LIMIT $limit;" 2>/dev/null || true)
+    fi
+    
+    # Format output
+    if [[ "$format" == "json" ]]; then
+        echo "$results" | jq -s 'flatten | sort_by(.timestamp) | reverse | limit('$limit'; .[])'
+    else
+        echo "$results" | jq -r 'select(. != null) | 
+            "\(.timestamp | strftime("%Y-%m-%d %H:%M:%S")) [\(.action)] \(.user)@\(.agent) -> \(.subject) (\(.result))"' | \
+            head -n "$limit"
+    fi
+}
+
+audit_export() {
+    warn "Export functionality not yet implemented."
+}
+
+
 cmd_restart() {
     # Parse arguments
     local delay=10
@@ -6668,6 +6889,7 @@ bobnet_main() {
         unlock) shift; cmd_unlock "$@" ;;
         lock) cmd_lock ;;
         update) cmd_update ;;
+        audit) shift; cmd_audit "$@" ;;
         trust) shift; cmd_trust "$@" ;;
         restart) shift; cmd_restart "$@" ;;
         upgrade) shift; cmd_upgrade "$@" ;;
