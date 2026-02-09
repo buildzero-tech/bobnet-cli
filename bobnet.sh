@@ -2643,6 +2643,9 @@ EOF
 }
 
 trust_add() {
+    # Permission check (Phase 4: RBAC)
+    check_permission "contact_add" || return 1
+    
     local email=""
     local name=""
     local user="$USER"
@@ -2852,6 +2855,9 @@ SQL
 }
 
 trust_set() {
+    # Permission check (Phase 4: RBAC)
+    check_permission "contact_set_trust" || return 1
+    
     local email=""
     local user="$USER"
     local trust_level=""
@@ -2916,14 +2922,20 @@ EOF
     local now=$(date +%s)
     sqlite3 "$registry_db" "UPDATE contacts SET $updates, updated_at = $now WHERE email = '$email'"
     
-    # Log trust event if score changed
+    # Log trust event if score changed (with attribution)
     if [[ -n "$trust_score" ]]; then
         local contact_id=$(sqlite3 "$registry_db" "SELECT id FROM contacts WHERE email = '$email'")
         local delta=$(echo "$trust_score - $old_score" | bc)
         
+        # Get attribution context
+        local attr_user="${BOBNET_USER:-$(get_current_user)}"
+        local attr_agent="${BOBNET_AGENT:-cli}"
+        local attr_channel="${BOBNET_CHANNEL:-cli}"
+        
         sqlite3 "$registry_db" <<SQL
-INSERT INTO trust_events (contact_id, timestamp, event_type, trust_delta, old_score, new_score)
-VALUES ($contact_id, $now, 'manual_update', $delta, $old_score, $trust_score);
+INSERT INTO trust_events (contact_id, timestamp, event_type, trust_delta, old_score, new_score, metadata)
+VALUES ($contact_id, $now, 'manual_update', $delta, $old_score, $trust_score, 
+    json_object('user', '$attr_user', 'agent', '$attr_agent', 'channel', '$attr_channel'));
 SQL
     fi
     
@@ -3437,6 +3449,7 @@ check_permission() {
         family:contact_view|\
         family:contact_archive|\
         family:contact_restore|\
+        family:contact_set_trust|\
         family:email_send|\
         family:email_draft|\
         family:email_approve|\
