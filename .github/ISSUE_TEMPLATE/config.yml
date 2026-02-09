@@ -4,3 +4,6 @@ contact_links:
   - name: BobNet Discussion
     url: https://github.com/buildzero-tech/bobnet-cli/discussions
     about: Ask questions and discuss ideas
+  - name: Multi-Issue Work (Agents)
+    url: https://github.com/buildzero-tech/bobnet-cli/blob/main/CONTRIBUTING.md#for-agents-use-bobnet-spec-create-issues
+    about: For Epics or large features, use `bobnet spec create-issues` instead of manual issue creation
