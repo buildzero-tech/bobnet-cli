@@ -1029,6 +1029,36 @@ EOF
         fi
     fi
     
+    # 5. Check skills
+    local skills=$(jq -c '.skills // {}' "$BOBNET_SCHEMA" 2>/dev/null)
+    if [[ "$skills" != "{}" && "$skills" != "null" ]]; then
+        echo ""
+        echo "--- Skills ---"
+        
+        local schema_dirs=$(echo "$skills" | jq -r '.extraDirs // [] | .[]' 2>/dev/null)
+        local live_dirs=$($claw config get skills.load.extraDirs 2>/dev/null | jq -r '.[]' 2>/dev/null || echo "")
+        
+        local skills_match=true
+        for dir in $schema_dirs; do
+            # Expand ~ for comparison
+            local expanded="${dir/#\~/$HOME}"
+            if ! echo "$live_dirs" | grep -qF "$expanded"; then
+                skills_match=false
+                break
+            fi
+        done
+        
+        if [[ "$skills_match" == "true" && -n "$schema_dirs" ]]; then
+            local count=$(echo "$schema_dirs" | wc -l | tr -d ' ')
+            success "skills.extraDirs in sync ($count dirs)"
+        else
+            echo "  skills.extraDirs:"
+            echo "    schema: $(echo "$schema_dirs" | tr '\n' ' ')"
+            echo "    live:   $(echo "$live_dirs" | tr '\n' ' ')"
+            changes+=("skills: extraDirs drift")
+        fi
+    fi
+    
     echo ""
     
     # Safety check: refuse to wipe everything
@@ -1128,6 +1158,31 @@ EOF
             # Build hooks config
             local hooks_config="{\"internal\":{\"enabled\":true,\"entries\":{\"session-memory\":{\"enabled\":$sm_enabled,\"env\":{\"messages\":\"$sm_messages\"}}}}}"
             $claw config set hooks "$hooks_config" --json && success "session-memory hook applied (messages: $sm_messages)"
+        fi
+    fi
+    
+    # Apply skills (extraDirs)
+    local skills=$(jq -c '.skills // {}' "$BOBNET_SCHEMA" 2>/dev/null)
+    if [[ "$skills" != "{}" && "$skills" != "null" ]]; then
+        echo ""
+        echo "--- Skills ---"
+        
+        local schema_dirs=$(echo "$skills" | jq -r '.extraDirs // [] | .[]' 2>/dev/null)
+        if [[ -n "$schema_dirs" ]]; then
+            # Build JSON array with expanded paths
+            local dirs_json='['
+            local first=true
+            while IFS= read -r dir; do
+                [[ -z "$dir" ]] && continue
+                # Expand ~ to absolute path
+                local expanded="${dir/#\~/$HOME}"
+                $first || dirs_json+=','
+                first=false
+                dirs_json+="\"$expanded\""
+            done <<< "$schema_dirs"
+            dirs_json+=']'
+            
+            $claw config set skills.load.extraDirs "$dirs_json" --json && success "skills.extraDirs applied"
         fi
     fi
     
@@ -2549,6 +2604,253 @@ EOF
     esac
 }
 
+# =============================================================================
+# Draft Management Functions (Phase 5: Email Approval Workflow)
+# =============================================================================
+
+get_draft_dir() {
+    local user="${1:-$USER}"
+    echo "$HOME/.bobnet/email-drafts/$user"
+}
+
+generate_draft_id() {
+    echo "draft-$(date +%Y%m%d-%H%M%S)-$$"
+}
+
+classify_content() {
+    local text="$1"
+    local highest_class="public"
+    
+    # Secret patterns
+    if echo "$text" | grep -Eiq 'password|api[_-]?key|token|secret|credentials'; then
+        highest_class="secret"
+    elif echo "$text" | grep -Eq '[A-Z0-9]{32,}'; then
+        highest_class="secret"
+    elif echo "$text" | grep -Eq '\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b'; then
+        highest_class="secret"
+    # Sensitive patterns
+    elif echo "$text" | grep -Eiq 'revenue|contract|salary|confidential'; then
+        highest_class="sensitive"
+    # Internal patterns
+    elif echo "$text" | grep -Eq 'buildzero\.tech|Ice 9'; then
+        highest_class="internal"
+    # Technical patterns
+    elif echo "$text" | grep -Eiq 'OpenClaw|BobNet|GitHub|database|API'; then
+        highest_class="technical-general"
+    fi
+    
+    echo "$highest_class"
+}
+
+draft_save() {
+    local to=""
+    local subject=""
+    local body=""
+    local user="$USER"
+    local expires_min=60
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to) to="$2"; shift 2 ;;
+            --subject) subject="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            --user) user="$2"; shift 2 ;;
+            --expires) expires_min="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet draft save --to <email> --subject <subject> --body <body>
+
+OPTIONS:
+  --to <email>        Recipient (required)
+  --subject <text>    Subject (required)
+  --body <text>       Body (required)
+  --expires <min>     Expiration (default: 60)
+
+OUTPUT: Draft ID
+EOF
+                return 0 ;;
+            *) error "Unknown argument: $1" ;;
+        esac
+    done
+    
+    [[ -z "$to" || -z "$subject" || -z "$body" ]] && \
+        error "Missing required fields"
+    
+    local info_class=$(classify_content "$body")
+    local trust_score="0.0"
+    local user_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    
+    if [[ -f "$user_db" ]]; then
+        local score=$(sqlite3 "$user_db" \
+            "SELECT COALESCE(trust_score, 0.0) FROM contacts WHERE email = '$to'" 2>/dev/null || echo "")
+        [[ -n "$score" ]] && trust_score="$score" || trust_score="0.0"
+    fi
+    
+    local draft_id=$(generate_draft_id)
+    local draft_dir=$(get_draft_dir "$user")
+    mkdir -p "$draft_dir"
+    
+    local now=$(date +%s)
+    local expires_at=$((now + expires_min * 60))
+    
+    jq -n \
+        --arg id "$draft_id" \
+        --arg user "$user" \
+        --arg to "$to" \
+        --arg subject "$subject" \
+        --arg body "$body" \
+        --arg info_class "$info_class" \
+        --arg trust_score "$trust_score" \
+        --arg created_at "$now" \
+        --arg expires_at "$expires_at" \
+        '{
+            id: $id, user: $user, to: $to, subject: $subject, body: $body,
+            info_class: $info_class, trust_score: ($trust_score | tonumber),
+            created_at: ($created_at | tonumber), expires_at: ($expires_at | tonumber)
+        }' > "$draft_dir/$draft_id.json"
+    
+    echo "$draft_id"
+}
+
+draft_list() {
+    local user="$USER"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) user="$2"; shift 2 ;;
+            -h|--help) echo "USAGE: bobnet draft list [--user <name>]"; return 0 ;;
+            *) error "Unknown argument: $1" ;;
+        esac
+    done
+    
+    local draft_dir=$(get_draft_dir "$user")
+    [[ ! -d "$draft_dir" ]] && echo "No drafts" && return 0
+    
+    local count=0
+    echo "Drafts ($user):"
+    for draft_file in "$draft_dir"/*.json; do
+        [[ ! -f "$draft_file" ]] && continue
+        echo "[$(jq -r '.id' "$draft_file")]"
+        echo "  To: $(jq -r '.to' "$draft_file")"
+        echo "  Subject: $(jq -r '.subject' "$draft_file")"
+        echo "  Class: $(jq -r '.info_class' "$draft_file")"
+        echo ""
+        ((count++))
+    done
+    [[ $count -eq 0 ]] && echo "No drafts" || echo "Total: $count"
+}
+
+draft_show() {
+    local draft_id="${1:-}"
+    local user="$USER"
+    
+    [[ "$draft_id" =~ ^(-h|--help)$ ]] && \
+        echo "USAGE: bobnet draft show <draft-id>" && return 0
+    
+    [[ "${2:-}" == "--user" ]] && user="${3:-}"
+    [[ -z "$draft_id" ]] && error "Draft ID required"
+    
+    local draft_file="$(get_draft_dir "$user")/$draft_id.json"
+    [[ ! -f "$draft_file" ]] && error "Draft not found: $draft_id"
+    
+    echo "Draft: $draft_id"
+    echo "To: $(jq -r '.to' "$draft_file")"
+    echo "Subject: $(jq -r '.subject' "$draft_file")"
+    echo ""
+    echo "Body:"
+    echo "$(jq -r '.body' "$draft_file")"
+    echo ""
+    echo "Class: $(jq -r '.info_class' "$draft_file") | Trust: $(jq -r '.trust_score' "$draft_file")"
+}
+
+draft_delete() {
+    local draft_id="${1:-}"
+    local user="$USER"
+    
+    [[ "$draft_id" =~ ^(-h|--help)$ ]] && \
+        echo "USAGE: bobnet draft delete <draft-id>" && return 0
+    
+    [[ "${2:-}" == "--user" ]] && user="${3:-}"
+    [[ -z "$draft_id" ]] && error "Draft ID required"
+    
+    local draft_file="$(get_draft_dir "$user")/$draft_id.json"
+    [[ ! -f "$draft_file" ]] && error "Draft not found: $draft_id"
+    
+    rm "$draft_file"
+    success "Draft deleted: $draft_id"
+}
+
+draft_check_auto_send() {
+    local to=""
+    local body=""
+    local user="$USER"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to) to="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            --user) user="$2"; shift 2 ;;
+            -h|--help)
+                echo "USAGE: bobnet draft check-auto-send --to <email> --body <text>"
+                echo "EXIT: 0=auto-send, 1=draft-first"
+                return 0 ;;
+            *) error "Unknown argument: $1" ;;
+        esac
+    done
+    
+    [[ -z "$to" || -z "$body" ]] && error "Missing --to or --body"
+    
+    local user_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    [[ ! -f "$user_db" ]] && echo "draft-first" && return 1
+    
+    local data=$(sqlite3 "$user_db" \
+        "SELECT trust_score, auto_send FROM contacts WHERE email = '$to'" 2>/dev/null || echo "")
+    
+    [[ -z "$data" ]] && echo "draft-first" && return 1
+    
+    local trust_score=$(echo "$data" | cut -d'|' -f1)
+    local auto_send=$(echo "$data" | cut -d'|' -f2)
+    local info_class=$(classify_content "$body")
+    
+    if [[ "$auto_send" -eq 1 ]] && \
+       awk "BEGIN {exit !($trust_score >= 0.7)}" && \
+       [[ "$info_class" != "sensitive" && "$info_class" != "secret" ]]; then
+        echo "auto-send"
+        return 0
+    fi
+    
+    echo "draft-first"
+    return 1
+}
+
+cmd_draft() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        save) draft_save "$@" ;;
+        list) draft_list "$@" ;;
+        show) draft_show "$@" ;;
+        delete) draft_delete "$@" ;;
+        check-auto-send) draft_check_auto_send "$@" ;;
+        -h|--help|help)
+            cat <<'EOF'
+USAGE: bobnet draft <command> [options]
+
+COMMANDS:
+  save                Create email draft
+  list                List drafts
+  show <draft-id>     Show draft details
+  delete <draft-id>   Delete draft
+  check-auto-send     Check if email should auto-send
+
+Run 'bobnet draft <command> --help' for details.
+EOF
+            ;;
+        *) error "Unknown draft command: $subcmd" ;;
+    esac
+}
+
 trust_init() {
     local user="$USER"
     local force=false
@@ -2947,6 +3249,150 @@ trust_import() {
 }
 
 
+# ============================================
+# Email Security Setup Command
+# ============================================
+
+cmd_setup_email_security() {
+    local username=""
+    local email=""
+    local role="family"
+    local agent="bob"
+    local skip_cron=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --user) username="$2"; shift 2 ;;
+            --email) email="$2"; shift 2 ;;
+            --role) role="$2"; shift 2 ;;
+            --agent) agent="$2"; shift 2 ;;
+            --skip-cron) skip_cron=true; shift ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet setup-email-security --user <name> --email <email> [OPTIONS]
+
+Set up email security for a user. This command automates:
+  1. User creation (if not exists)
+  2. Trust registry initialization
+  3. Agent binding
+  4. Cron job installation (optional)
+
+OPTIONS:
+  --user <name>       Required. Username for the system
+  --email <email>     Required. User's email address
+  --role <role>       User role: owner, family, delegate, read-only (default: family)
+  --agent <agent>     Agent to bind (default: bob)
+  --skip-cron         Skip cron job installation
+
+EXAMPLES:
+  bobnet setup-email-security --user penny --email penny@theberrys.email --role family
+  bobnet setup-email-security --user james --email james@buildzero.tech --role owner
+  bobnet setup-email-security --user assistant --email assistant@example.com --role delegate --skip-cron
+EOF
+                return 0 ;;
+            -*) error "Unknown option: $1" ;;
+            *) shift ;;
+        esac
+    done
+    
+    [[ -z "$username" ]] && error "Missing required option: --user <name>"
+    [[ -z "$email" ]] && error "Missing required option: --email <email>"
+    
+    echo "=== BobNet Email Security Setup ==="
+    echo ""
+    echo "User:  $username"
+    echo "Email: $email"
+    echo "Role:  $role"
+    echo "Agent: $agent"
+    echo ""
+    
+    # Step 1: Check/create user
+    echo "--- Step 1: User Management ---"
+    if bobnet user show "$username" &>/dev/null; then
+        echo "  User '$username' already exists"
+    else
+        echo "  Creating user '$username'..."
+        bobnet user add "$username" --email "$email" --role "$role"
+        success "User created"
+    fi
+    
+    # Step 2: Initialize trust registry
+    echo ""
+    echo "--- Step 2: Trust Registry ---"
+    local registry_db="$BOBNET_ROOT/config/trust-registry-$username.db"
+    if [[ -f "$registry_db" ]]; then
+        echo "  Trust registry already exists: $registry_db"
+    else
+        echo "  Initializing trust registry..."
+        BOBNET_USER="$username" bobnet trust init
+        success "Trust registry initialized"
+    fi
+    
+    # Step 3: Bind agent
+    echo ""
+    echo "--- Step 3: Agent Binding ---"
+    if bobnet user show "$username" 2>/dev/null | grep -q "Agents:.*$agent"; then
+        echo "  Agent '$agent' already bound to user '$username'"
+    else
+        echo "  Binding agent '$agent' to user '$username'..."
+        bobnet user bind-agent "$agent" "$username" 2>/dev/null || true
+        success "Agent bound"
+    fi
+    
+    # Step 4: Install cron jobs (owner only)
+    echo ""
+    echo "--- Step 4: Cron Jobs ---"
+    if [[ "$skip_cron" == "true" ]]; then
+        echo "  Skipping cron job installation (--skip-cron)"
+    elif [[ "$role" != "owner" ]]; then
+        echo "  Skipping cron jobs (owner role required)"
+    else
+        local cron_src="$BOBNET_ROOT/config/bobnet-cron.conf"
+        local cron_dst="/etc/cron.d/bobnet-email-security"
+        
+        if [[ -f "$cron_src" ]]; then
+            if [[ -f "$cron_dst" ]]; then
+                echo "  Cron jobs already installed"
+            else
+                echo "  Installing cron jobs..."
+                echo "  Run: sudo cp $cron_src $cron_dst"
+                echo "  (Requires sudo - skipping automatic installation)"
+            fi
+        else
+            warn "Cron config not found: $cron_src"
+        fi
+    fi
+    
+    # Step 5: Create email drafts directory
+    echo ""
+    echo "--- Step 5: Directories ---"
+    local drafts_dir="$HOME/.bobnet/email-drafts/$username"
+    if [[ -d "$drafts_dir" ]]; then
+        echo "  Drafts directory exists: $drafts_dir"
+    else
+        mkdir -p "$drafts_dir"
+        success "Created drafts directory: $drafts_dir"
+    fi
+    
+    echo ""
+    echo "=== Setup Complete ==="
+    echo ""
+    echo "Summary:"
+    echo "  User:           $username ($email)"
+    echo "  Role:           $role"
+    echo "  Trust Registry: $registry_db"
+    echo "  Agent:          $agent"
+    echo "  Drafts:         $drafts_dir"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Add trusted contacts:  bobnet trust add <email> --user $username"
+    echo "  2. Test email workflow:   bobnet draft check-auto-send --to test@example.com --body 'Hello'"
+    if [[ "$role" == "owner" && "$skip_cron" != "true" ]]; then
+        echo "  3. Install cron jobs:     sudo cp $BOBNET_ROOT/config/bobnet-cron.conf /etc/cron.d/bobnet-email-security"
+    fi
+}
+
+
 cmd_restart() {
     # Parse arguments
     local delay=10
@@ -3175,9 +3621,10 @@ OPTIONS:
 
 PROCESS:
   1. Backup config
-  2. Apply config migrations (e.g., BlueBubbles allowPrivateUrl)
+  2. Apply known config migrations (remove deprecated keys)
   3. Stop gateway
   4. npm install -g openclaw@VERSION
+  4.5. Run doctor --fix (auto-cleanup for new schema)
   5. Start gateway
   6. Run health checks (version, connectivity)
   7. Rollback if checks fail (reinstall old version)
@@ -3244,9 +3691,10 @@ EOF
         echo "=== Dry Run ==="
         echo "Would perform:"
         echo "  1. Backup config to ~/.openclaw/openclaw.json.pre-upgrade"
-        echo "  2. Apply config migrations (BlueBubbles allowPrivateUrl, etc.)"
+        echo "  2. Apply known config migrations (remove deprecated keys)"
         echo "  3. Stop gateway (launchctl bootout)"
         echo "  4. npm install -g openclaw@$target_version"
+        echo "  4.5. Run 'openclaw doctor --fix' (auto-cleanup for new schema)"
         echo "  5. Start gateway (launchctl bootstrap)"
         echo "  6. Poll health endpoint (up to 30s)"
         echo "  7. Run health checks"
@@ -3279,16 +3727,18 @@ EOF
     # Step 2: Apply config migrations before switching
     echo ""
     echo "--- Step 2: Apply config migrations ---"
-    local bb_url=$(jq -r '.channels.bluebubbles.serverUrl // ""' "$config" 2>/dev/null)
-    if [[ "$bb_url" =~ ^http://(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|localhost) ]]; then
-        echo "  BlueBubbles uses private IP: $bb_url"
-        if ! jq -e '.channels.bluebubbles.allowPrivateUrl' "$config" >/dev/null 2>&1; then
-            jq '.channels.bluebubbles.allowPrivateUrl = true' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-            success "Added BlueBubbles allowPrivateUrl=true"
-        else
-            echo "  allowPrivateUrl already set"
-        fi
-    else
+    local migrations_applied=0
+    
+    # Migration: Remove deprecated allowPrivateUrl (removed in OpenClaw 2026.2.x)
+    if jq -e '.channels.bluebubbles.allowPrivateUrl' "$config" >/dev/null 2>&1; then
+        jq 'del(.channels.bluebubbles.allowPrivateUrl)' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        success "Removed deprecated BlueBubbles allowPrivateUrl"
+        ((migrations_applied++))
+    fi
+    
+    # Future migrations go here (check if key exists, remove/rename as needed)
+    
+    if [[ $migrations_applied -eq 0 ]]; then
         echo "  No migrations needed"
     fi
     
@@ -3307,6 +3757,18 @@ EOF
     else
         echo -e "${RED}npm install failed${NC}"
         rollback_needed=true
+    fi
+    
+    # Step 4.5: Run doctor to fix any schema changes
+    if [[ "$rollback_needed" == "false" ]]; then
+        echo ""
+        echo "--- Step 4.5: Config schema cleanup ---"
+        # Run doctor with --fix --yes to auto-repair config for new schema
+        if openclaw doctor --fix --yes 2>&1 | grep -E "(Removed|Fixed|Updated|Applied)" | head -5; then
+            success "Config cleaned up for new schema"
+        else
+            echo "  No additional cleanup needed"
+        fi
     fi
     
     # Step 5: Start gateway
@@ -5354,38 +5816,86 @@ EOF
 }
 
 cmd_docs_roadmap() {
-    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-        cat <<'EOF'
+    local format="summary"
+    local project_number=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                cat <<'EOF'
 Usage: bobnet docs roadmap [options]
 
-Generate ROADMAP.md from GitHub milestones and projects.
+Query roadmap from GitHub Projects API (issues-based, always current).
 
-OUTPUT:
-  ROADMAP.md with milestones grouped by quarter/release
+GitHub Projects with issues is the canonical roadmap source (not ROADMAP.md files).
+This command queries the project board and displays upcoming work.
+
+OPTIONS:
+  --json              Output raw JSON for agent processing
+  --project <number>  Query specific project number (default: auto-detect)
 
 EXAMPLES:
-  bobnet docs roadmap
-  bobnet docs roadmap > ROADMAP.md
+  bobnet docs roadmap                    # Human-readable summary
+  bobnet docs roadmap --json             # Machine-parseable JSON
+  bobnet docs roadmap --project 4        # Specific project
+
+See: https://github.com/github/roadmap (GitHub's official approach)
 EOF
+                return 0
+                ;;
+            --json)
+                format="json"
+                shift
+                ;;
+            --project)
+                project_number="$2"
+                shift 2
+                ;;
+            *)
+                error "Unknown option: $1"
+                return 1
+                ;;
+        esac
+    done
+    
+    # Auto-detect project if not specified
+    if [[ -z "$project_number" ]]; then
+        # Try to find "BobNet Work" or first project
+        local projects
+        projects=$(gh project list --owner buildzero-tech --format json 2>/dev/null | jq -r '.projects[] | select(.title=="BobNet Work") | .number' | head -1)
+        
+        if [[ -z "$projects" ]]; then
+            # Fall back to first project
+            projects=$(gh project list --owner buildzero-tech --format json 2>/dev/null | jq -r '.projects[0].number')
+        fi
+        
+        project_number="$projects"
+    fi
+    
+    if [[ -z "$project_number" ]]; then
+        error "No GitHub Project found. Specify with --project <number>"
+        return 1
+    fi
+    
+    # Query project items
+    local items
+    items=$(gh project item-list "$project_number" --owner buildzero-tech --format json 2>/dev/null)
+    
+    if [[ -z "$items" ]]; then
+        echo "No items found in project."
         return 0
     fi
     
-    echo "# Product Roadmap"
-    echo
-    echo "*Last updated: $(date +%Y-%m-%d) (auto-generated via \`bobnet docs roadmap\`)*"
-    echo
-    
-    # Fetch all milestones
-    local milestones
-    milestones=$(gh api repos/:owner/:repo/milestones --jq '.[] | {title:.title, due:.due_on, state:.state, open:.open_issues, closed:.closed_issues, description:.description}' 2>/dev/null)
-    
-    if [[ -z "$milestones" ]]; then
-        echo "No milestones found."
-        return 0
+    if [[ "$format" == "json" ]]; then
+        echo "$items"
+    else
+        # Human-readable summary
+        echo "=== Roadmap (GitHub Project #$project_number) ==="
+        echo
+        echo "$items" | jq -r '.items[] | "[\(.status)] #\(.content.number) \(.content.title)"'
+        echo
+        echo "View full roadmap: https://github.com/orgs/buildzero-tech/projects/$project_number"
     fi
-    
-    # Group by year/quarter or just list
-    echo "$milestones" | jq -r '. | "## \(.title)\n\n**Due:** \(.due // "No due date")  \n**Status:** \(.state)  \n**Progress:** \(.closed)/\((.open + .closed)) issues\n\n\(.description // "No description")\n"'
 }
 
 cmd_docs_changelog() {
@@ -6630,6 +7140,9 @@ COMMANDS:
   lock                Lock git-crypt
   update              Update CLI to latest version
   trust [cmd]         Contact trust management (init, add, list, show)
+  draft [cmd]         Email draft management (save, list, show, delete)
+  user [cmd]          User management (add, list, show, bind-agent)
+  setup-email-security  Set up email security for a user
   restart             Restart gateway with broadcast warning
   upgrade             Upgrade OpenClaw with rollback support
 
@@ -6669,8 +7182,10 @@ bobnet_main() {
         lock) cmd_lock ;;
         update) cmd_update ;;
         trust) shift; cmd_trust "$@" ;;
+        draft) shift; cmd_draft "$@" ;;
         restart) shift; cmd_restart "$@" ;;
         upgrade) shift; cmd_upgrade "$@" ;;
+        setup-email-security) shift; cmd_setup_email_security "$@" ;;
         help|--help|-h) cmd_help ;;
         --version) echo "bobnet v$BOBNET_CLI_VERSION" ;;
         *) error "Unknown command: $1" ;;
