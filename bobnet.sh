@@ -3621,9 +3621,10 @@ OPTIONS:
 
 PROCESS:
   1. Backup config
-  2. Apply config migrations (e.g., BlueBubbles allowPrivateUrl)
+  2. Apply known config migrations (remove deprecated keys)
   3. Stop gateway
   4. npm install -g openclaw@VERSION
+  4.5. Run doctor --fix (auto-cleanup for new schema)
   5. Start gateway
   6. Run health checks (version, connectivity)
   7. Rollback if checks fail (reinstall old version)
@@ -3690,9 +3691,10 @@ EOF
         echo "=== Dry Run ==="
         echo "Would perform:"
         echo "  1. Backup config to ~/.openclaw/openclaw.json.pre-upgrade"
-        echo "  2. Apply config migrations (BlueBubbles allowPrivateUrl, etc.)"
+        echo "  2. Apply known config migrations (remove deprecated keys)"
         echo "  3. Stop gateway (launchctl bootout)"
         echo "  4. npm install -g openclaw@$target_version"
+        echo "  4.5. Run 'openclaw doctor --fix' (auto-cleanup for new schema)"
         echo "  5. Start gateway (launchctl bootstrap)"
         echo "  6. Poll health endpoint (up to 30s)"
         echo "  7. Run health checks"
@@ -3725,16 +3727,18 @@ EOF
     # Step 2: Apply config migrations before switching
     echo ""
     echo "--- Step 2: Apply config migrations ---"
-    local bb_url=$(jq -r '.channels.bluebubbles.serverUrl // ""' "$config" 2>/dev/null)
-    if [[ "$bb_url" =~ ^http://(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|localhost) ]]; then
-        echo "  BlueBubbles uses private IP: $bb_url"
-        if ! jq -e '.channels.bluebubbles.allowPrivateUrl' "$config" >/dev/null 2>&1; then
-            jq '.channels.bluebubbles.allowPrivateUrl = true' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-            success "Added BlueBubbles allowPrivateUrl=true"
-        else
-            echo "  allowPrivateUrl already set"
-        fi
-    else
+    local migrations_applied=0
+    
+    # Migration: Remove deprecated allowPrivateUrl (removed in OpenClaw 2026.2.x)
+    if jq -e '.channels.bluebubbles.allowPrivateUrl' "$config" >/dev/null 2>&1; then
+        jq 'del(.channels.bluebubbles.allowPrivateUrl)' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        success "Removed deprecated BlueBubbles allowPrivateUrl"
+        ((migrations_applied++))
+    fi
+    
+    # Future migrations go here (check if key exists, remove/rename as needed)
+    
+    if [[ $migrations_applied -eq 0 ]]; then
         echo "  No migrations needed"
     fi
     
@@ -3753,6 +3757,18 @@ EOF
     else
         echo -e "${RED}npm install failed${NC}"
         rollback_needed=true
+    fi
+    
+    # Step 4.5: Run doctor to fix any schema changes
+    if [[ "$rollback_needed" == "false" ]]; then
+        echo ""
+        echo "--- Step 4.5: Config schema cleanup ---"
+        # Run doctor with --fix --yes to auto-repair config for new schema
+        if openclaw doctor --fix --yes 2>&1 | grep -E "(Removed|Fixed|Updated|Applied)" | head -5; then
+            success "Config cleaned up for new schema"
+        else
+            echo "  No additional cleanup needed"
+        fi
     fi
     
     # Step 5: Start gateway
