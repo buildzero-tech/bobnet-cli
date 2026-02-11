@@ -5816,38 +5816,86 @@ EOF
 }
 
 cmd_docs_roadmap() {
-    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-        cat <<'EOF'
+    local format="summary"
+    local project_number=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                cat <<'EOF'
 Usage: bobnet docs roadmap [options]
 
-Generate ROADMAP.md from GitHub milestones and projects.
+Query roadmap from GitHub Projects API (issues-based, always current).
 
-OUTPUT:
-  ROADMAP.md with milestones grouped by quarter/release
+GitHub Projects with issues is the canonical roadmap source (not ROADMAP.md files).
+This command queries the project board and displays upcoming work.
+
+OPTIONS:
+  --json              Output raw JSON for agent processing
+  --project <number>  Query specific project number (default: auto-detect)
 
 EXAMPLES:
-  bobnet docs roadmap
-  bobnet docs roadmap > ROADMAP.md
+  bobnet docs roadmap                    # Human-readable summary
+  bobnet docs roadmap --json             # Machine-parseable JSON
+  bobnet docs roadmap --project 4        # Specific project
+
+See: https://github.com/github/roadmap (GitHub's official approach)
 EOF
+                return 0
+                ;;
+            --json)
+                format="json"
+                shift
+                ;;
+            --project)
+                project_number="$2"
+                shift 2
+                ;;
+            *)
+                error "Unknown option: $1"
+                return 1
+                ;;
+        esac
+    done
+    
+    # Auto-detect project if not specified
+    if [[ -z "$project_number" ]]; then
+        # Try to find "BobNet Work" or first project
+        local projects
+        projects=$(gh project list --owner buildzero-tech --format json 2>/dev/null | jq -r '.projects[] | select(.title=="BobNet Work") | .number' | head -1)
+        
+        if [[ -z "$projects" ]]; then
+            # Fall back to first project
+            projects=$(gh project list --owner buildzero-tech --format json 2>/dev/null | jq -r '.projects[0].number')
+        fi
+        
+        project_number="$projects"
+    fi
+    
+    if [[ -z "$project_number" ]]; then
+        error "No GitHub Project found. Specify with --project <number>"
+        return 1
+    fi
+    
+    # Query project items
+    local items
+    items=$(gh project item-list "$project_number" --owner buildzero-tech --format json 2>/dev/null)
+    
+    if [[ -z "$items" ]]; then
+        echo "No items found in project."
         return 0
     fi
     
-    echo "# Product Roadmap"
-    echo
-    echo "*Last updated: $(date +%Y-%m-%d) (auto-generated via \`bobnet docs roadmap\`)*"
-    echo
-    
-    # Fetch all milestones
-    local milestones
-    milestones=$(gh api repos/:owner/:repo/milestones --jq '.[] | {title:.title, due:.due_on, state:.state, open:.open_issues, closed:.closed_issues, description:.description}' 2>/dev/null)
-    
-    if [[ -z "$milestones" ]]; then
-        echo "No milestones found."
-        return 0
+    if [[ "$format" == "json" ]]; then
+        echo "$items"
+    else
+        # Human-readable summary
+        echo "=== Roadmap (GitHub Project #$project_number) ==="
+        echo
+        echo "$items" | jq -r '.items[] | "[\(.status)] #\(.content.number) \(.content.title)"'
+        echo
+        echo "View full roadmap: https://github.com/orgs/buildzero-tech/projects/$project_number"
     fi
-    
-    # Group by year/quarter or just list
-    echo "$milestones" | jq -r '. | "## \(.title)\n\n**Due:** \(.due // "No due date")  \n**Status:** \(.state)  \n**Progress:** \(.closed)/\((.open + .closed)) issues\n\n\(.description // "No description")\n"'
 }
 
 cmd_docs_changelog() {
