@@ -14,7 +14,7 @@ get_all_agents() { jq -r '.agents | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo
 get_agent_scope() { jq -r --arg a "$1" '.agents[$a].scope // "work"' "$AGENTS_SCHEMA" 2>/dev/null; }
 get_agents_by_scope() { jq -r --arg s "$1" '.agents | to_entries[] | select(.value.scope == $s) | .key' "$AGENTS_SCHEMA" 2>/dev/null; }
 get_workspace() { echo "$BOBNET_ROOT/workspace/$1"; }
-get_agent_dir() { echo "$BOBNET_ROOT/agents/$1"; }
+get_agent_dir() { echo "$BOBNET_ROOT/vault/agents/$1"; }
 get_all_scopes() { jq -r '.scopes | keys[]' "$AGENTS_SCHEMA" 2>/dev/null || echo ""; }
 agent_exists() { [[ -d "$(get_workspace "$1")" ]]; }
 validate_agent() { agent_exists "$1" || { echo "Agent '$1' not found" >&2; return 1; }; }
