@@ -1472,11 +1472,8 @@ EOF
 }
 
 cmd_link() {
-    # NOTE: Using directory-level symlink (vault migration):
-    #   ~/.openclaw/agents -> ~/.bobnet/ultima-thule/vault/agents
-    #
-    # This simplifies management: one symlink instead of N agent symlinks.
-    # OpenClaw follows symlinks transparently for session/auth read/write.
+    # Directory-level symlink management (vault migration)
+    # ~/.openclaw/agents -> ~/.bobnet/ultima-thule/vault/agents
     
     local OC_AGENTS="$CONFIG_DIR/agents"
     local BN_AGENTS="$BOBNET_ROOT/vault/agents"
@@ -1484,290 +1481,117 @@ cmd_link() {
     case "${1:-status}" in
         -h|--help|help)
             cat <<'EOF'
-Usage: bobnet link [command] [options]
+Usage: bobnet link [command]
 
-Manage symlinks from ~/.openclaw/agents/ to BobNet agents directory.
+Manage directory symlink from ~/.openclaw/agents/ to BobNet vault.
 
 COMMANDS:
-  status    Show link status for all agents (default)
-  create    Create missing symlinks (backs up existing data first)
-  unlink    Remove symlinks, restore real directories
-  check     Validate all links are correct (exit 1 if issues)
+  status    Show symlink status (default)
+  create    Create directory symlink (backs up existing if real directory)
+  unlink    Remove symlink, restore real directory
+  check     Validate symlink (exit 1 if broken, for CI/automation)
 
 OPTIONS (unlink):
-  --restore   Restore from backup instead of copying from BobNet
-  --agent X   Only unlink specific agent
+  --restore   Restore from backup instead of copying from vault
 
 EXAMPLES:
   bobnet link              # Show status
-  bobnet link create       # Create/fix all symlinks
-  bobnet link unlink       # Remove symlinks, copy data from BobNet
-  bobnet link unlink --restore  # Restore from agents-backup/
-  bobnet link check        # Validate (for CI/scripts)
-
-SAFETY:
-  'create' backs up to ~/.openclaw/agents-backup/<agent>-<timestamp>/
-  'unlink --restore' recovers from the most recent backup
+  bobnet link create       # Create directory symlink
+  bobnet link unlink       # Remove symlink, copy from vault
+  bobnet link unlink --restore  # Restore from backup
+  bobnet link check        # Validate (for scripts)
 EOF
             return 0
             ;;
         status)
-            echo "Agent Directory Links"
-            echo "====================="
-            echo "OpenClaw: $OC_AGENTS"
-            echo "BobNet:   $BN_AGENTS"
-            echo ""
-            
-            local issues=0
-            for agent_dir in "$BN_AGENTS"/*/; do
-                [[ -d "$agent_dir" ]] || continue
-                local agent=$(basename "$agent_dir")
-                local oc_path="$OC_AGENTS/$agent"
-                
-                if [[ -L "$oc_path" ]]; then
-                    local target=$(readlink "$oc_path")
-                    if [[ "$target" == "$BN_AGENTS/$agent" ]]; then
-                        echo -e "  ${GREEN}✓${NC} $agent → linked"
-                    else
-                        echo -e "  ${YELLOW}⚠${NC} $agent → wrong target: $target"
-                        ((issues++))
-                    fi
-                elif [[ -d "$oc_path" ]]; then
-                    echo -e "  ${YELLOW}⚠${NC} $agent → real directory (needs migration)"
-                    ((issues++))
+            if [[ -L "$OC_AGENTS" ]]; then
+                local target=$(readlink "$OC_AGENTS")
+                if [[ "$target" == "$BN_AGENTS" ]]; then
+                    echo "✓ Directory symlink: $OC_AGENTS -> $BN_AGENTS"
                 else
-                    echo -e "  ${YELLOW}⚠${NC} $agent → missing"
-                    ((issues++))
+                    echo "⚠ Wrong target: $OC_AGENTS -> $target (expected: $BN_AGENTS)"
+                    return 1
                 fi
-            done
-            
-            echo ""
-            if [[ $issues -gt 0 ]]; then
-                echo "Run 'bobnet link create' to fix $issues issue(s)"
+            elif [[ -d "$OC_AGENTS" ]]; then
+                echo "⚠ Real directory (needs migration): $OC_AGENTS"
+                echo "Run 'bobnet link create' to convert to symlink"
                 return 1
             else
-                echo "All links OK"
+                echo "⚠ Missing: $OC_AGENTS"
+                echo "Run 'bobnet link create' to create symlink"
+                return 1
             fi
             ;;
         create)
-            echo "Creating agent directory links..."
-            mkdir -p "$OC_AGENTS"
-            
-            for agent_dir in "$BN_AGENTS"/*/; do
-                [[ -d "$agent_dir" ]] || continue
-                local agent=$(basename "$agent_dir")
-                local oc_path="$OC_AGENTS/$agent"
-                local bn_path="$BN_AGENTS/$agent"
-                
-                if [[ -L "$oc_path" ]]; then
-                    local target=$(readlink "$oc_path")
-                    if [[ "$target" == "$bn_path" ]]; then
-                        success "$agent: already linked"
-                    else
-                        rm "$oc_path"
-                        ln -s "$bn_path" "$oc_path"
-                        success "$agent: relinked (was: $target)"
-                    fi
-                elif [[ -d "$oc_path" ]]; then
-                    echo "  Migrating $agent..."
-                    
-                    local backup_dir="$CONFIG_DIR/agents-backup"
-                    local timestamp=$(date +%Y%m%d-%H%M%S)
-                    
-                    # Always backup OpenClaw directory if it has content
-                    if [[ -n "$(ls -A "$oc_path" 2>/dev/null)" ]]; then
-                        local backup_path="$backup_dir/${agent}-oc-${timestamp}"
-                        mkdir -p "$backup_dir"
-                        cp -r "$oc_path" "$backup_path"
-                        echo "    Backed up OpenClaw: $backup_path"
-                    fi
-                    
-                    # Migrate items from OC to BN
-                    local has_conflicts=false
-                    for item in "$oc_path"/*; do
-                        [[ -e "$item" ]] || continue
-                        local name=$(basename "$item")
-                        
-                        if [[ ! -e "$bn_path/$name" ]]; then
-                            # Doesn't exist in BN - just copy
-                            cp -r "$item" "$bn_path/"
-                            echo "    Migrated: $name"
-                        elif [[ "$name" == "sessions" && -d "$item" && -d "$bn_path/$name" ]]; then
-                            # Sessions directory - merge individual session files
-                            local merged=0
-                            for sess in "$item"/*; do
-                                [[ -e "$sess" ]] || continue
-                                local sess_name=$(basename "$sess")
-                                if [[ ! -e "$bn_path/$name/$sess_name" ]]; then
-                                    cp -r "$sess" "$bn_path/$name/"
-                                    ((merged++))
-                                fi
-                            done
-                            echo "    Merged sessions: $merged new session(s)"
-                        else
-                            # Conflict - backup BobNet version too, keep BN
-                            has_conflicts=true
-                            if [[ ! -d "$backup_dir/${agent}-bn-${timestamp}" ]]; then
-                                mkdir -p "$backup_dir/${agent}-bn-${timestamp}"
-                            fi
-                            cp -r "$bn_path/$name" "$backup_dir/${agent}-bn-${timestamp}/"
-                            echo "    Conflict: $name (keeping BobNet, both backed up)"
-                        fi
-                    done
-                    
-                    if [[ "$has_conflicts" == "true" ]]; then
-                        echo "    ${YELLOW}⚠${NC} Conflicts backed up to $backup_dir/${agent}-bn-${timestamp}/"
-                        echo "      Review and merge manually if needed"
-                    fi
-                    
-                    # Remove OC directory and create symlink
-                    rm -rf "$oc_path"
-                    ln -s "$bn_path" "$oc_path"
-                    success "$agent: migrated and linked"
+            if [[ -L "$OC_AGENTS" ]]; then
+                local target=$(readlink "$OC_AGENTS")
+                if [[ "$target" == "$BN_AGENTS" ]]; then
+                    success "Directory symlink already exists and points correctly"
+                    return 0
                 else
-                    ln -s "$bn_path" "$oc_path"
-                    success "$agent: linked"
+                    warn "Fixing symlink target (was: $target)"
+                    rm "$OC_AGENTS"
                 fi
-            done
+            elif [[ -d "$OC_AGENTS" ]]; then
+                local timestamp=$(date +%Y%m%d-%H%M%S)
+                local backup_path="$CONFIG_DIR/agents-backup-$timestamp"
+                
+                info "Backing up existing directory to: $backup_path"
+                cp -r "$OC_AGENTS" "$backup_path"
+                rm -rf "$OC_AGENTS"
+                success "Backed up real directory"
+            fi
             
+            mkdir -p "$(dirname "$OC_AGENTS")"
+            ln -s "$BN_AGENTS" "$OC_AGENTS"
+            success "Created directory symlink: $OC_AGENTS -> $BN_AGENTS"
             echo ""
-            echo "Done. Restart gateway to apply: openclaw gateway restart"
+            echo "Restart gateway to apply: openclaw gateway restart"
             ;;
         unlink)
             local restore=false
-            local target_agent=""
             shift 2>/dev/null || true
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    --restore|-r) restore=true; shift ;;
-                    --agent|-a) target_agent="$2"; shift 2 ;;
-                    *) error "Unknown option: $1" ;;
-                esac
-            done
+            [[ "$1" == "--restore" || "$1" == "-r" ]] && restore=true
             
-            local backup_dir="$CONFIG_DIR/agents-backup"
+            if [[ ! -L "$OC_AGENTS" ]]; then
+                if [[ -d "$OC_AGENTS" ]]; then
+                    echo "Already a real directory: $OC_AGENTS"
+                else
+                    warn "Nothing to unlink (doesn't exist): $OC_AGENTS"
+                fi
+                return 0
+            fi
+            
+            info "Removing symlink: $OC_AGENTS"
+            rm "$OC_AGENTS"
             
             if [[ "$restore" == "true" ]]; then
-                # Restore from backup
-                if [[ ! -d "$backup_dir" ]]; then
-                    error "No backups found at $backup_dir"
-                fi
-                
-                echo "Available backups:"
-                local backups=()
-                for b in "$backup_dir"/*; do
-                    [[ -d "$b" ]] || continue
-                    backups+=("$b")
-                    local name=$(basename "$b")
-                    local agent="${name%-*}"  # strip timestamp
-                    echo "  $(( ${#backups[@]} )). $name"
-                done
-                
-                if [[ ${#backups[@]} -eq 0 ]]; then
-                    error "No backups found"
-                fi
-                
-                echo ""
-                read -rp "Restore which backup? [1-${#backups[@]}, or 'all' for most recent per agent]: " choice
-                
-                if [[ "$choice" == "all" ]]; then
-                    # Find most recent backup for each agent
-                    declare -A latest
-                    for b in "${backups[@]}"; do
-                        local name=$(basename "$b")
-                        local agent="${name%-*}"
-                        latest[$agent]="$b"  # later ones overwrite (sorted by timestamp)
-                    done
-                    
-                    for agent in "${!latest[@]}"; do
-                        local backup_path="${latest[$agent]}"
-                        local oc_path="$OC_AGENTS/$agent"
-                        
-                        echo "Restoring $agent from $(basename "$backup_path")..."
-                        
-                        # Remove existing (symlink or dir)
-                        if [[ -L "$oc_path" ]]; then
-                            rm "$oc_path"
-                        elif [[ -d "$oc_path" ]]; then
-                            rm -rf "$oc_path"
-                        fi
-                        
-                        cp -r "$backup_path" "$oc_path"
-                        success "$agent: restored"
-                    done
+                local backup=$(ls -dt "$CONFIG_DIR"/agents-backup-* 2>/dev/null | head -1)
+                if [[ -n "$backup" ]]; then
+                    info "Restoring from backup: $backup"
+                    cp -r "$backup" "$OC_AGENTS"
+                    success "Restored from backup"
                 else
-                    local idx=$((choice - 1))
-                    if [[ $idx -lt 0 || $idx -ge ${#backups[@]} ]]; then
-                        error "Invalid choice"
-                    fi
-                    
-                    local backup_path="${backups[$idx]}"
-                    local name=$(basename "$backup_path")
-                    local agent="${name%-*}"
-                    local oc_path="$OC_AGENTS/$agent"
-                    
-                    echo "Restoring $agent from $name..."
-                    
-                    if [[ -L "$oc_path" ]]; then
-                        rm "$oc_path"
-                    elif [[ -d "$oc_path" ]]; then
-                        rm -rf "$oc_path"
-                    fi
-                    
-                    cp -r "$backup_path" "$oc_path"
-                    success "$agent: restored"
+                    error "No backup found at $CONFIG_DIR/agents-backup-*"
                 fi
             else
-                # Convert symlinks to real directories (copy from BobNet)
-                echo "Unlinking agent directories..."
-                
-                for agent_dir in "$BN_AGENTS"/*/; do
-                    [[ -d "$agent_dir" ]] || continue
-                    local agent=$(basename "$agent_dir")
-                    
-                    # Skip if targeting specific agent
-                    [[ -n "$target_agent" && "$agent" != "$target_agent" ]] && continue
-                    
-                    local oc_path="$OC_AGENTS/$agent"
-                    local bn_path="$BN_AGENTS/$agent"
-                    
-                    if [[ -L "$oc_path" ]]; then
-                        echo "  Unlinking $agent..."
-                        rm "$oc_path"
-                        cp -r "$bn_path" "$oc_path"
-                        success "$agent: unlinked (copied from BobNet)"
-                    elif [[ -d "$oc_path" ]]; then
-                        echo "  $agent: already a real directory"
-                    else
-                        echo "  $agent: not found in OpenClaw"
-                    fi
-                done
+                info "Copying from vault: $BN_AGENTS"
+                cp -r "$BN_AGENTS" "$OC_AGENTS"
+                success "Created real directory from vault"
             fi
             
             echo ""
-            echo "Done. Restart gateway to apply: openclaw gateway restart"
+            echo "Restart gateway to apply: openclaw gateway restart"
             ;;
         check)
-            # Silent check for scripts/CI
-            local issues=0
-            for agent_dir in "$BN_AGENTS"/*/; do
-                [[ -d "$agent_dir" ]] || continue
-                local agent=$(basename "$agent_dir")
-                local oc_path="$OC_AGENTS/$agent"
-                
-                if [[ -L "$oc_path" ]]; then
-                    local target=$(readlink "$oc_path")
-                    [[ "$target" == "$BN_AGENTS/$agent" ]] || ((issues++))
-                else
-                    ((issues++))
+            if [[ -L "$OC_AGENTS" ]]; then
+                local target=$(readlink "$OC_AGENTS")
+                if [[ "$target" == "$BN_AGENTS" ]]; then
+                    return 0
                 fi
-            done
-            
-            if [[ $issues -gt 0 ]]; then
-                echo "Link check failed: $issues issue(s)"
-                return 1
             fi
-            return 0
+            echo "Link check failed"
+            return 1
             ;;
         *)
             error "Unknown link command: $1 (try 'bobnet link help')"
