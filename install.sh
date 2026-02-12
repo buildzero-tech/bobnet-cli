@@ -349,10 +349,9 @@ case "$REPO_MODE" in
         mkdir -p ~/.secrets && chmod 700 ~/.secrets
         git-crypt export-key "$KEY_FILE" && chmod 600 "$KEY_FILE"
         echo "  ✓ key: $KEY_FILE"
-        mkdir -p agents workspace collective/{work,personal,patterns} config
+        mkdir -p vault/{agents,data,config} workspace collective/{work,personal,patterns} config
         cat > .gitattributes << 'EOF'
-agents/** filter=git-crypt diff=git-crypt
-agents/**/* filter=git-crypt diff=git-crypt
+vault/** filter=git-crypt diff=git-crypt
 EOF
         cat > .gitignore << 'EOF'
 workspace/*/repos/
