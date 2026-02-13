@@ -2771,7 +2771,7 @@ trust_import() {
 # Area Commands - Manage area registry for todo organization
 # ============================================================================
 
-AREA_DB="$BOBNET_ROOT/vault/data/todos.db"
+TODO_DB="$BOBNET_ROOT/vault/data/todos.db"
 
 cmd_area() {
     local subcmd="${1:-help}"
@@ -2837,12 +2837,12 @@ EOF
     done
     
     # Check database exists
-    if [[ ! -f "$AREA_DB" ]]; then
-        error "Todo database not found at $AREA_DB. Start todo-app first."
+    if [[ ! -f "$TODO_DB" ]]; then
+        error "Todo database not found at $TODO_DB. Start todo-app first."
     fi
     
     # Check if already initialized
-    local table_exists=$(sqlite3 "$AREA_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='areas';" 2>/dev/null)
+    local table_exists=$(sqlite3 "$TODO_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='areas';" 2>/dev/null)
     if [[ -n "$table_exists" ]]; then
         info "Area registry already initialized"
         if [[ "$seed" == "true" ]]; then
@@ -2853,7 +2853,7 @@ EOF
     
     info "Creating area registry tables..."
     
-    sqlite3 "$AREA_DB" <<'SQL'
+    sqlite3 "$TODO_DB" <<'SQL'
 CREATE TABLE IF NOT EXISTS areas (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -2862,7 +2862,7 @@ CREATE TABLE IF NOT EXISTS areas (
     description TEXT,
     signal_group_id TEXT,
     sync_config TEXT,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER
 );
 
@@ -2875,7 +2875,7 @@ CREATE TABLE IF NOT EXISTS area_collaborators (
     collaborator_type TEXT NOT NULL CHECK (collaborator_type IN ('agent', 'user')),
     collaborator_id TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('owner', 'collaborator', 'viewer')),
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     FOREIGN KEY (area_id) REFERENCES areas(id) ON DELETE CASCADE,
     UNIQUE(area_id, collaborator_type, collaborator_id)
 );
@@ -2886,7 +2886,7 @@ CREATE TABLE IF NOT EXISTS user_area_defaults (
     user_id TEXT PRIMARY KEY,
     default_work_area TEXT,
     default_personal_area TEXT,
-    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER
 );
 SQL
@@ -2901,7 +2901,7 @@ SQL
 area_seed() {
     info "Seeding default areas..."
     
-    sqlite3 "$AREA_DB" <<'SQL'
+    sqlite3 "$TODO_DB" <<'SQL'
 INSERT OR IGNORE INTO areas (id, name, scope, owner_agent, description)
 VALUES 
     ('ice9', 'Ice9 Productions', 'work', 'bob', 'Primary consulting client'),
@@ -2971,11 +2971,17 @@ EOF
     
     [[ -z "$name" ]] && name="$id"
     
-    sqlite3 "$AREA_DB" "INSERT INTO areas (id, name, scope, owner_agent, description) VALUES ('$id', '$name', '$scope', '$owner', '$description');" 2>/dev/null || error "Failed to create area (already exists?)"
+    # Escape single quotes for SQL safety
+    id="${id//\'/\'\'}"
+    name="${name//\'/\'\'}"
+    description="${description//\'/\'\'}"
+    owner="${owner//\'/\'\'}"
+    
+    sqlite3 "$TODO_DB" "INSERT INTO areas (id, name, scope, owner_agent, description) VALUES ('$id', '$name', '$scope', '$owner', '$description');" 2>/dev/null || error "Failed to create area (already exists?)"
     
     # Add owner as collaborator
     if [[ -n "$owner" ]]; then
-        sqlite3 "$AREA_DB" "INSERT OR IGNORE INTO area_collaborators (area_id, collaborator_type, collaborator_id, role) VALUES ('$id', 'agent', '$owner', 'owner');"
+        sqlite3 "$TODO_DB" "INSERT OR IGNORE INTO area_collaborators (area_id, collaborator_type, collaborator_id, role) VALUES ('$id', 'agent', '$owner', 'owner');"
     fi
     
     success "Created area: $id ($scope, owner: ${owner:-none})"
@@ -3016,7 +3022,7 @@ EOF
     query="$query ORDER BY a.scope, a.name;"
     
     echo ""
-    sqlite3 -header -column "$AREA_DB" "$query"
+    sqlite3 -header -column "$TODO_DB" "$query"
     echo ""
 }
 
@@ -3036,21 +3042,21 @@ EOF
         return 0
     fi
     
-    local exists=$(sqlite3 "$AREA_DB" "SELECT id FROM areas WHERE id = '$id';" 2>/dev/null)
+    local exists=$(sqlite3 "$TODO_DB" "SELECT id FROM areas WHERE id = '$id';" 2>/dev/null)
     [[ -z "$exists" ]] && error "Area not found: $id"
     
     echo ""
     echo "Area: $id"
     echo "========================================"
-    sqlite3 -line "$AREA_DB" "SELECT name, scope, owner_agent, description FROM areas WHERE id = '$id';"
+    sqlite3 -line "$TODO_DB" "SELECT name, scope, owner_agent, description FROM areas WHERE id = '$id';"
     
     echo ""
     echo "Collaborators:"
-    sqlite3 -header -column "$AREA_DB" "SELECT collaborator_type as type, collaborator_id as id, role FROM area_collaborators WHERE area_id = '$id';"
+    sqlite3 -header -column "$TODO_DB" "SELECT collaborator_type as type, collaborator_id as id, role FROM area_collaborators WHERE area_id = '$id';"
     
     echo ""
     echo "Todos:"
-    local todo_count=$(sqlite3 "$AREA_DB" "SELECT COUNT(*) FROM todos WHERE bucket LIKE '%:area:$id';" 2>/dev/null || echo "0")
+    local todo_count=$(sqlite3 "$TODO_DB" "SELECT COUNT(*) FROM todos WHERE bucket LIKE '%:area:$id';" 2>/dev/null || echo "0")
     echo "  $todo_count todos in this area"
     echo ""
 }
@@ -3090,7 +3096,11 @@ EOF
     [[ -z "$area" ]] && error "Area ID required"
     [[ -z "$collab_id" ]] && error "Collaborator ID required"
     
-    sqlite3 "$AREA_DB" "INSERT OR REPLACE INTO area_collaborators (area_id, collaborator_type, collaborator_id, role) VALUES ('$area', '$collab_type', '$collab_id', '$role');" 2>/dev/null || error "Failed to add collaborator"
+    # Escape single quotes for SQL safety
+    area="${area//\'/\'\'}"
+    collab_id="${collab_id//\'/\'\'}"
+    
+    sqlite3 "$TODO_DB" "INSERT OR REPLACE INTO area_collaborators (area_id, collaborator_type, collaborator_id, role) VALUES ('$area', '$collab_type', '$collab_id', '$role');" 2>/dev/null || error "Failed to add collaborator"
     
     success "Added $collab_type '$collab_id' as $role to area '$area'"
 }
@@ -3123,7 +3133,11 @@ EOF
     [[ -z "$area" ]] && error "Area ID required"
     [[ -z "$collab_id" ]] && error "Collaborator ID required"
     
-    sqlite3 "$AREA_DB" "DELETE FROM area_collaborators WHERE area_id = '$area' AND collaborator_id = '$collab_id';" 2>/dev/null || error "Failed to remove collaborator"
+    # Escape single quotes for SQL safety
+    area="${area//\'/\'\'}"
+    collab_id="${collab_id//\'/\'\'}"
+    
+    sqlite3 "$TODO_DB" "DELETE FROM area_collaborators WHERE area_id = '$area' AND collaborator_id = '$collab_id';" 2>/dev/null || error "Failed to remove collaborator"
     
     success "Removed '$collab_id' from area '$area'"
 }
@@ -3132,8 +3146,6 @@ EOF
 # ============================================================================
 # Task Commands - Manage todos with area awareness
 # ============================================================================
-
-TASK_DB="$BOBNET_ROOT/vault/data/todos.db"
 
 cmd_task() {
     local subcmd="${1:-help}"
@@ -3178,7 +3190,7 @@ EOF
 }
 
 task_add() {
-    local text="" area="" priority=3 due="" tags=""
+    local text="" area="" priority=3 due="" tags="" quiet=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -3186,6 +3198,7 @@ task_add() {
             --priority|-p) priority="$2"; shift 2 ;;
             --due|-d) due="$2"; shift 2 ;;
             --tags|-t) tags="$2"; shift 2 ;;
+            --quiet|-q) quiet=true; shift ;;
             -h|--help)
                 cat <<'EOF'
 USAGE: bobnet task add <text> [OPTIONS]
@@ -3197,10 +3210,12 @@ OPTIONS:
   --priority, -p <1-5>   Priority (1=lowest, 5=highest, default: 3)
   --due, -d <date>       Due date (YYYY-MM-DD or relative: tomorrow, +3d)
   --tags, -t <tags>      Comma-separated tags
+  --quiet, -q            Suppress output (just print ID)
 
 EXAMPLES:
   bobnet task add "Review PR #123" --area ice9 --priority 5
   bobnet task add "Buy groceries" --area household --due tomorrow
+  id=$(bobnet task add "Quick task" -q)
 EOF
                 return 0 ;;
             *)
@@ -3220,7 +3235,7 @@ EOF
     # Build bucket from area
     local bucket="inbox"
     if [[ -n "$area" ]]; then
-        local scope=$(sqlite3 "$TASK_DB" "SELECT scope FROM areas WHERE id = '$area';" 2>/dev/null)
+        local scope=$(sqlite3 "$TODO_DB" "SELECT scope FROM areas WHERE id = '$area';" 2>/dev/null)
         [[ -z "$scope" ]] && error "Area not found: $area"
         bucket="${scope}:area:${area}"
     fi
@@ -3242,13 +3257,17 @@ EOF
     text="${text//\'/\'\'}"
     
     # Insert todo
-    sqlite3 "$TASK_DB" "INSERT INTO todos (id, text, bucket, priority, due_date, tags, created_at, updated_at) VALUES ('$id', '$text', '$bucket', $priority, $due_date, '$tags', $now, $now);" 2>/dev/null || error "Failed to add task"
+    sqlite3 "$TODO_DB" "INSERT INTO todos (id, text, bucket, priority, due_date, tags, created_at, updated_at) VALUES ('$id', '$text', '$bucket', $priority, $due_date, '$tags', $now, $now);" 2>/dev/null || error "Failed to add task"
     
-    success "Added task: ${id:0:8}"
-    echo "  Text: $text"
-    [[ -n "$area" ]] && echo "  Area: $area"
-    echo "  Priority: $priority"
-    [[ "$due_date" != "NULL" ]] && echo "  Due: $due"
+    if [[ "$quiet" == "true" ]]; then
+        echo "$id"
+    else
+        success "Added task: ${id:0:8}"
+        echo "  Text: $text"
+        [[ -n "$area" ]] && echo "  Area: $area"
+        echo "  Priority: $priority"
+        [[ "$due_date" != "NULL" ]] && echo "  Due: $due"
+    fi
 }
 
 task_list() {
@@ -3313,7 +3332,7 @@ EOF
     LIMIT $limit;"
     
     echo ""
-    sqlite3 -header -column "$TASK_DB" "$query"
+    sqlite3 -header -column "$TODO_DB" "$query"
     echo ""
 }
 
@@ -3336,12 +3355,12 @@ EOF
     local now=$(date +%s)
     
     # Match partial ID
-    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    local full_id=$(sqlite3 "$TODO_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
     [[ -z "$full_id" ]] && error "Task not found: $id"
     
-    sqlite3 "$TASK_DB" "UPDATE todos SET completed = 1, updated_at = $now WHERE id = '$full_id';" 2>/dev/null || error "Failed to complete task"
+    sqlite3 "$TODO_DB" "UPDATE todos SET completed = 1, updated_at = $now WHERE id = '$full_id';" 2>/dev/null || error "Failed to complete task"
     
-    local text=$(sqlite3 "$TASK_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    local text=$(sqlite3 "$TODO_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
     success "Completed: $text"
 }
 
@@ -3360,11 +3379,11 @@ EOF
         return 0
     fi
     
-    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    local full_id=$(sqlite3 "$TODO_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
     [[ -z "$full_id" ]] && error "Task not found: $id"
     
     echo ""
-    sqlite3 -line "$TASK_DB" "SELECT 
+    sqlite3 -line "$TODO_DB" "SELECT 
         id,
         text,
         bucket,
@@ -3412,7 +3431,7 @@ EOF
     
     [[ -z "$id" ]] && error "Task ID required"
     
-    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    local full_id=$(sqlite3 "$TODO_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
     [[ -z "$full_id" ]] && error "Task not found: $id"
     
     local updates=()
@@ -3427,7 +3446,7 @@ EOF
     
     local set_clause=$(IFS=', '; echo "${updates[*]}")
     
-    sqlite3 "$TASK_DB" "UPDATE todos SET $set_clause WHERE id = '$full_id';" 2>/dev/null || error "Failed to update task"
+    sqlite3 "$TODO_DB" "UPDATE todos SET $set_clause WHERE id = '$full_id';" 2>/dev/null || error "Failed to update task"
     
     success "Updated task: ${full_id:0:8}"
 }
@@ -3447,12 +3466,12 @@ EOF
         return 0
     fi
     
-    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    local full_id=$(sqlite3 "$TODO_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
     [[ -z "$full_id" ]] && error "Task not found: $id"
     
-    local text=$(sqlite3 "$TASK_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    local text=$(sqlite3 "$TODO_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
     
-    sqlite3 "$TASK_DB" "DELETE FROM todos WHERE id = '$full_id';" 2>/dev/null || error "Failed to delete task"
+    sqlite3 "$TODO_DB" "DELETE FROM todos WHERE id = '$full_id';" 2>/dev/null || error "Failed to delete task"
     
     success "Deleted: $text"
 }
@@ -3473,13 +3492,13 @@ EOF
         return 0
     fi
     
-    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    local full_id=$(sqlite3 "$TODO_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
     [[ -z "$full_id" ]] && error "Task not found: $id"
     
     # Get task details
-    local text=$(sqlite3 "$TASK_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
-    local bucket=$(sqlite3 "$TASK_DB" "SELECT bucket FROM todos WHERE id = '$full_id';" 2>/dev/null)
-    local priority=$(sqlite3 "$TASK_DB" "SELECT priority FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    local text=$(sqlite3 "$TODO_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    local bucket=$(sqlite3 "$TODO_DB" "SELECT bucket FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    local priority=$(sqlite3 "$TODO_DB" "SELECT priority FROM todos WHERE id = '$full_id';" 2>/dev/null)
     
     # Extract area from bucket
     local area=""
@@ -3493,7 +3512,7 @@ EOF
     fi
     
     # Get area owner
-    local owner=$(sqlite3 "$TASK_DB" "SELECT owner_agent FROM areas WHERE id = '$area';" 2>/dev/null)
+    local owner=$(sqlite3 "$TODO_DB" "SELECT owner_agent FROM areas WHERE id = '$area';" 2>/dev/null)
     
     if [[ -z "$owner" ]]; then
         warn "Area '$area' has no owner agent"
@@ -3537,7 +3556,7 @@ EOF
         return 0
     fi
     
-    local exists=$(sqlite3 "$TASK_DB" "SELECT id FROM areas WHERE id = '$area';" 2>/dev/null)
+    local exists=$(sqlite3 "$TODO_DB" "SELECT id FROM areas WHERE id = '$area';" 2>/dev/null)
     [[ -z "$exists" ]] && error "Area not found: $area"
     
     echo ""
@@ -3545,14 +3564,14 @@ EOF
     echo "========================================"
     
     # Area details
-    sqlite3 -line "$TASK_DB" "SELECT name, scope, owner_agent, signal_group_id FROM areas WHERE id = '$area';"
+    sqlite3 -line "$TODO_DB" "SELECT name, scope, owner_agent, signal_group_id FROM areas WHERE id = '$area';"
     
     echo ""
     echo "Collaborators:"
-    sqlite3 -header -column "$TASK_DB" "SELECT collaborator_type as type, collaborator_id as id, role FROM area_collaborators WHERE area_id = '$area';"
+    sqlite3 -header -column "$TODO_DB" "SELECT collaborator_type as type, collaborator_id as id, role FROM area_collaborators WHERE area_id = '$area';"
     
     # Check bobnet.json for agent bindings
-    local owner=$(sqlite3 "$TASK_DB" "SELECT owner_agent FROM areas WHERE id = '$area';" 2>/dev/null)
+    local owner=$(sqlite3 "$TODO_DB" "SELECT owner_agent FROM areas WHERE id = '$area';" 2>/dev/null)
     if [[ -n "$owner" ]]; then
         echo ""
         echo "Owner Agent ($owner) Bindings:"
