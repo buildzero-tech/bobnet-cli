@@ -2396,7 +2396,7 @@ EOF
         esac
     done
     
-    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    local registry_db="$BOBNET_ROOT/vault/data/trust-registry-$user.db"
     local schema_file="$BOBNET_ROOT/scripts/sql/trust-registry-schema.sql"
     
     # Check if already exists
@@ -2468,7 +2468,7 @@ EOF
     # Normalize email
     email=$(echo "$email" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
     
-    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    local registry_db="$BOBNET_ROOT/vault/data/trust-registry-$user.db"
     [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
     
     # Check if contact exists
@@ -2525,7 +2525,7 @@ EOF
         esac
     done
     
-    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    local registry_db="$BOBNET_ROOT/vault/data/trust-registry-$user.db"
     [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
     
     # Build query
@@ -2590,7 +2590,7 @@ EOF
     
     email=$(echo "$email" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
     
-    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    local registry_db="$BOBNET_ROOT/vault/data/trust-registry-$user.db"
     [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
     
     # Get contact details
@@ -2671,7 +2671,7 @@ EOF
     
     email=$(echo "$email" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
     
-    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    local registry_db="$BOBNET_ROOT/vault/data/trust-registry-$user.db"
     [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
     
     # Get current values
@@ -2743,7 +2743,7 @@ EOF
         esac
     done
     
-    local registry_db="$BOBNET_ROOT/config/trust-registry-$user.db"
+    local registry_db="$BOBNET_ROOT/vault/data/trust-registry-$user.db"
     [[ ! -f "$registry_db" ]] && error "Trust registry not found. Run 'bobnet trust init' first."
     
     # Export to vCard
