@@ -4503,26 +4503,26 @@ parse_spec_file() {
     
     case "$field" in
         context)
-            grep -m1 "^\*\*Context:\*\*" "$spec_file" | sed 's/^\*\*Context:\*\* *//'
+            grep -m1 "^\*\*Context:\*\*" "$spec_file" | sed 's/^\*\*Context:\*\* *//' | sed 's/[[:space:]]*$//'
             ;;
         milestone)
             # Try both formats: "**GitHub Milestone:**" and "- **Milestone:**"
-            local ms=$(grep -m1 "^\*\*GitHub Milestone:\*\*" "$spec_file" | sed 's/^\*\*GitHub Milestone:\*\* *//')
-            [[ -z "$ms" ]] && ms=$(grep -m1 "^- \*\*Milestone:\*\*" "$spec_file" | sed 's/^- \*\*Milestone:\*\* *//')
+            local ms=$(grep -m1 "^\*\*GitHub Milestone:\*\*" "$spec_file" | sed 's/^\*\*GitHub Milestone:\*\* *//' | sed 's/[[:space:]]*$//')
+            [[ -z "$ms" ]] && ms=$(grep -m1 "^- \*\*Milestone:\*\*" "$spec_file" | sed 's/^- \*\*Milestone:\*\* *//' | sed 's/[[:space:]]*$//')
             echo "$ms"
             ;;
         primary-repo)
             # Look in "This Spec's Context" section first
-            local repo=$(awk '/^## This Spec/{flag=1; next} /^##/{flag=0} flag' "$spec_file" | grep -m1 "\*\*Primary Repository:\*\*" | sed 's/.*\*\*Primary Repository:\*\* *//')
+            local repo=$(awk '/^## This Spec/{flag=1; next} /^##/{flag=0} flag' "$spec_file" | grep -m1 "\*\*Primary Repository:\*\*" | sed 's/.*\*\*Primary Repository:\*\* *//' | sed 's/[[:space:]]*$//')
             # Fallback to top-level if not found
-            [[ -z "$repo" ]] && repo=$(grep -m1 "^\*\*Primary Repository:\*\*" "$spec_file" | sed 's/^\*\*Primary Repository:\*\* *//')
+            [[ -z "$repo" ]] && repo=$(grep -m1 "^\*\*Primary Repository:\*\*" "$spec_file" | sed 's/^\*\*Primary Repository:\*\* *//' | sed 's/[[:space:]]*$//')
             echo "$repo"
             ;;
         additional-repos)
             # Look in "This Spec's Context" section first
-            local repos=$(awk '/^## This Spec/{flag=1; next} /^##/{flag=0} flag' "$spec_file" | grep -m1 "\*\*Additional Repos:\*\*" | sed 's/.*\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//')
+            local repos=$(awk '/^## This Spec/{flag=1; next} /^##/{flag=0} flag' "$spec_file" | grep -m1 "\*\*Additional Repos:\*\*" | sed 's/.*\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//' | sed 's/[[:space:]]*$//')
             # Fallback to top-level if not found
-            [[ -z "$repos" ]] && repos=$(grep -m1 "^\*\*Additional Repos:\*\*" "$spec_file" | sed 's/^\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//')
+            [[ -z "$repos" ]] && repos=$(grep -m1 "^\*\*Additional Repos:\*\*" "$spec_file" | sed 's/^\*\*Additional Repos:\*\* *//' | sed 's/ (.*)//' | sed 's/[[:space:]]*$//')
             echo "$repos"
             ;;
     esac
@@ -4544,13 +4544,13 @@ parse_epic_section() {
     
     case "$field" in
         repository)
-            echo "$epic_section" | grep -m1 "^\*\*Primary Repository:\*\*" | sed 's/^\*\*Primary Repository:\*\* *//'
+            echo "$epic_section" | grep -m1 "^\*\*Primary Repository:\*\*" | sed 's/^\*\*Primary Repository:\*\* *//' | sed 's/[[:space:]]*$//'
             ;;
         status)
-            echo "$epic_section" | grep -m1 "^\*\*Status:\*\*" | sed 's/^\*\*Status:\*\* *//'
+            echo "$epic_section" | grep -m1 "^\*\*Status:\*\*" | sed 's/^\*\*Status:\*\* *//' | sed 's/[[:space:]]*$//'
             ;;
         dependencies)
-            echo "$epic_section" | grep -m1 "^\*\*Dependencies:\*\*" | sed 's/^\*\*Dependencies:\*\* *//'
+            echo "$epic_section" | grep -m1 "^\*\*Dependencies:\*\*" | sed 's/^\*\*Dependencies:\*\* *//' | sed 's/[[:space:]]*$//'
             ;;
     esac
 }
