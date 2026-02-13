@@ -4563,13 +4563,50 @@ extract_work_items() {
     awk -v start="$start_line" '
         NR >= start && /^### Epic:/ && NR > start { exit }
         NR >= start && /^## [A-Z]/ && !/^###/ { exit }
-        NR >= start && /^####/ { category=$0; sub(/^#### /, "", category); sub(/ \(.*/, "", category); next }
-        NR >= start && /^- / { 
+        
+        # Heading format: #### Issue: Title (SLASH-V2 style)
+        NR >= start && /^#### Issue/ {
+            title=$0
+            sub(/^#### Issue[: ]*/, "", title)
+            sub(/^#[0-9]+-?[0-9]*: /, "", title)
+            sub(/ \(.*/, "", title)
+            sub(/ #[0-9]+$/, "", title)
+            if (length(title) > 0) {
+                print "Issue|" title
+            }
+            next
+        }
+        
+        # Flat bullet format: - Issue: Title (TODO-APP style)
+        NR >= start && /^- Issue:/ {
+            title=$0
+            sub(/^- Issue: /, "", title)
+            sub(/ #[0-9]+$/, "", title)
+            sub(/ [a-z-]+\/[a-z-]+#[0-9]+$/, "", title)
+            if (length(title) > 0) {
+                print "Issue|" title
+            }
+            next
+        }
+        
+        # Category headers (for flat bullet format)
+        NR >= start && /^####/ && !/^#### Issue/ {
+            category=$0
+            sub(/^#### /, "", category)
+            sub(/ \(.*/, "", category)
+            next
+        }
+        
+        # Work items under category (flat bullet format only)
+        NR >= start && category != "" && /^- / && !/^- Issue:/ {
             item=$0
             sub(/^- /, "", item)
             sub(/ #[0-9]+$/, "", item)
             sub(/ [a-z-]+\/[a-z-]+#[0-9]+$/, "", item)
-            print category "|" item
+            # Only treat as work item if it looks substantial (not just task/acceptance bullet)
+            if (item !~ /^[A-Z][a-z]+ / && length(item) > 10) {
+                print category "|" item
+            }
         }
     ' "$spec_file"
 }
