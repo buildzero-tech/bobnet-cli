@@ -3129,6 +3129,331 @@ EOF
 }
 
 
+# ============================================================================
+# Task Commands - Manage todos with area awareness
+# ============================================================================
+
+TASK_DB="$BOBNET_ROOT/vault/data/todos.db"
+
+cmd_task() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        add) task_add "$@" ;;
+        list) task_list "$@" ;;
+        done) task_done "$@" ;;
+        show) task_show "$@" ;;
+        edit) task_edit "$@" ;;
+        delete) task_delete "$@" ;;
+        -h|--help|help)
+            cat <<'EOF'
+USAGE: bobnet task <command> [options]
+
+Manage todos with area awareness.
+
+COMMANDS:
+  add <title>           Add a new task
+  list                  List tasks
+  done <id>             Mark task as complete
+  show <id>             Show task details
+  edit <id>             Edit a task
+  delete <id>           Delete a task
+
+EXAMPLES:
+  bobnet task add "Review PR" --area ice9 --priority 5
+  bobnet task list --area household
+  bobnet task done abc123
+  bobnet task list --pending
+
+Run 'bobnet task <command> --help' for details.
+EOF
+            ;;
+        *) error "Unknown task command: $subcmd" ;;
+    esac
+}
+
+task_add() {
+    local text="" area="" priority=3 due="" tags=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --area|-a) area="$2"; shift 2 ;;
+            --priority|-p) priority="$2"; shift 2 ;;
+            --due|-d) due="$2"; shift 2 ;;
+            --tags|-t) tags="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet task add <text> [OPTIONS]
+
+Add a new task.
+
+OPTIONS:
+  --area, -a <area>      Area (ice9, household, etc.)
+  --priority, -p <1-5>   Priority (1=lowest, 5=highest, default: 3)
+  --due, -d <date>       Due date (YYYY-MM-DD or relative: tomorrow, +3d)
+  --tags, -t <tags>      Comma-separated tags
+
+EXAMPLES:
+  bobnet task add "Review PR #123" --area ice9 --priority 5
+  bobnet task add "Buy groceries" --area household --due tomorrow
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$text" ]]; then
+                    text="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$text" ]] && error "Task text required"
+    
+    # Generate ID
+    local id=$(openssl rand -hex 8)
+    local now=$(date +%s)
+    
+    # Build bucket from area
+    local bucket="inbox"
+    if [[ -n "$area" ]]; then
+        local scope=$(sqlite3 "$TASK_DB" "SELECT scope FROM areas WHERE id = '$area';" 2>/dev/null)
+        [[ -z "$scope" ]] && error "Area not found: $area"
+        bucket="${scope}:area:${area}"
+    fi
+    
+    # Parse due date (epoch seconds)
+    local due_date="NULL"
+    if [[ -n "$due" ]]; then
+        case "$due" in
+            tomorrow) due_date=$(date -v+1d +%s) ;;
+            +*d) 
+                local days="${due#+}"
+                days="${days%d}"
+                due_date=$(date -v+${days}d +%s) ;;
+            *) due_date=$(date -j -f "%Y-%m-%d" "$due" +%s 2>/dev/null) ;;
+        esac
+    fi
+    
+    # Escape single quotes in text
+    text="${text//\'/\'\'}"
+    
+    # Insert todo
+    sqlite3 "$TASK_DB" "INSERT INTO todos (id, text, bucket, priority, due_date, tags, created_at, updated_at) VALUES ('$id', '$text', '$bucket', $priority, $due_date, '$tags', $now, $now);" 2>/dev/null || error "Failed to add task"
+    
+    success "Added task: ${id:0:8}"
+    echo "  Text: $text"
+    [[ -n "$area" ]] && echo "  Area: $area"
+    echo "  Priority: $priority"
+    [[ "$due_date" != "NULL" ]] && echo "  Due: $due"
+}
+
+task_list() {
+    local area="" pending=false completed=false limit=20
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --area|-a) area="$2"; shift 2 ;;
+            --pending) pending=true; shift ;;
+            --completed) completed=true; shift ;;
+            --limit|-l) limit="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet task list [OPTIONS]
+
+List tasks.
+
+OPTIONS:
+  --area, -a <area>    Filter by area
+  --pending            Show only pending tasks
+  --completed          Show only completed tasks
+  --limit, -l <n>      Max results (default: 20)
+
+EXAMPLES:
+  bobnet task list --area ice9
+  bobnet task list --pending
+  bobnet task list --completed --limit 10
+EOF
+                return 0 ;;
+            *) shift ;;
+        esac
+    done
+    
+    local where_clauses=()
+    
+    if [[ -n "$area" ]]; then
+        where_clauses+=("bucket LIKE '%:area:$area'")
+    fi
+    
+    if [[ "$pending" == "true" ]]; then
+        where_clauses+=("completed = 0")
+    fi
+    
+    if [[ "$completed" == "true" ]]; then
+        where_clauses+=("completed = 1")
+    fi
+    
+    local where=""
+    if [[ ${#where_clauses[@]} -gt 0 ]]; then
+        where="WHERE $(IFS=' AND '; echo "${where_clauses[*]}")"
+    fi
+    
+    local query="SELECT 
+        substr(id, 1, 8) as id,
+        CASE WHEN completed = 1 THEN '✓' ELSE ' ' END as done,
+        priority as pri,
+        substr(text, 1, 40) as task,
+        CASE WHEN instr(bucket, ':area:') > 0 THEN substr(bucket, instr(bucket, ':area:') + 6) ELSE bucket END as area
+    FROM todos 
+    $where
+    ORDER BY completed ASC, priority DESC, created_at DESC
+    LIMIT $limit;"
+    
+    echo ""
+    sqlite3 -header -column "$TASK_DB" "$query"
+    echo ""
+}
+
+task_done() {
+    local id="$1"
+    
+    if [[ -z "$id" || "$id" == "-h" || "$id" == "--help" ]]; then
+        cat <<'EOF'
+USAGE: bobnet task done <id>
+
+Mark a task as complete.
+
+EXAMPLES:
+  bobnet task done abc123
+  bobnet task done 5ff0b28c
+EOF
+        return 0
+    fi
+    
+    local now=$(date +%s)
+    
+    # Match partial ID
+    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    [[ -z "$full_id" ]] && error "Task not found: $id"
+    
+    sqlite3 "$TASK_DB" "UPDATE todos SET completed = 1, updated_at = $now WHERE id = '$full_id';" 2>/dev/null || error "Failed to complete task"
+    
+    local text=$(sqlite3 "$TASK_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    success "Completed: $text"
+}
+
+task_show() {
+    local id="$1"
+    
+    if [[ -z "$id" || "$id" == "-h" || "$id" == "--help" ]]; then
+        cat <<'EOF'
+USAGE: bobnet task show <id>
+
+Show task details.
+
+EXAMPLES:
+  bobnet task show abc123
+EOF
+        return 0
+    fi
+    
+    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    [[ -z "$full_id" ]] && error "Task not found: $id"
+    
+    echo ""
+    sqlite3 -line "$TASK_DB" "SELECT 
+        id,
+        text,
+        bucket,
+        priority,
+        CASE WHEN completed = 1 THEN 'Yes' ELSE 'No' END as completed,
+        tags,
+        datetime(created_at, 'unixepoch', 'localtime') as created,
+        datetime(updated_at, 'unixepoch', 'localtime') as updated,
+        CASE WHEN due_date IS NOT NULL THEN datetime(due_date, 'unixepoch', 'localtime') ELSE NULL END as due
+    FROM todos WHERE id = '$full_id';"
+    echo ""
+}
+
+task_edit() {
+    local id="" text="" priority="" tags=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --text|-t) text="$2"; shift 2 ;;
+            --priority|-p) priority="$2"; shift 2 ;;
+            --tags) tags="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet task edit <id> [OPTIONS]
+
+Edit a task.
+
+OPTIONS:
+  --text, -t <text>      New text
+  --priority, -p <1-5>   New priority
+  --tags <tags>          New tags
+
+EXAMPLES:
+  bobnet task edit abc123 --priority 5
+  bobnet task edit abc123 --text "Updated text"
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$id" ]]; then
+                    id="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$id" ]] && error "Task ID required"
+    
+    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    [[ -z "$full_id" ]] && error "Task not found: $id"
+    
+    local updates=()
+    [[ -n "$text" ]] && updates+=("text = '${text//\'/\'\'}'")
+    [[ -n "$priority" ]] && updates+=("priority = $priority")
+    [[ -n "$tags" ]] && updates+=("tags = '$tags'")
+    
+    [[ ${#updates[@]} -eq 0 ]] && error "No updates specified"
+    
+    local now=$(date +%s)
+    updates+=("updated_at = $now")
+    
+    local set_clause=$(IFS=', '; echo "${updates[*]}")
+    
+    sqlite3 "$TASK_DB" "UPDATE todos SET $set_clause WHERE id = '$full_id';" 2>/dev/null || error "Failed to update task"
+    
+    success "Updated task: ${full_id:0:8}"
+}
+
+task_delete() {
+    local id="$1"
+    
+    if [[ -z "$id" || "$id" == "-h" || "$id" == "--help" ]]; then
+        cat <<'EOF'
+USAGE: bobnet task delete <id>
+
+Delete a task.
+
+EXAMPLES:
+  bobnet task delete abc123
+EOF
+        return 0
+    fi
+    
+    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    [[ -z "$full_id" ]] && error "Task not found: $id"
+    
+    local text=$(sqlite3 "$TASK_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    
+    sqlite3 "$TASK_DB" "DELETE FROM todos WHERE id = '$full_id';" 2>/dev/null || error "Failed to delete task"
+    
+    success "Deleted: $text"
+}
+
+
 cmd_restart() {
     # Parse arguments
     local delay=10
@@ -6852,6 +7177,7 @@ bobnet_main() {
         update) cmd_update ;;
         trust) shift; cmd_trust "$@" ;;
         area) shift; cmd_area "$@" ;;
+        task) shift; cmd_task "$@" ;;
         restart) shift; cmd_restart "$@" ;;
         upgrade) shift; cmd_upgrade "$@" ;;
         help|--help|-h) cmd_help ;;
