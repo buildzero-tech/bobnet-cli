@@ -84,9 +84,8 @@ for script in "${TEST_SCRIPTS[@]}"; do
         else
             FAILED_SUITES=$((FAILED_SUITES + 1))
             TOTAL_TESTS=$((TOTAL_TESTS + 6))
+            echo "$OUTPUT"  # Print BEFORE error() exits
             error "$script failed"
-            echo "$OUTPUT"
-            exit 1
         fi
     fi
     

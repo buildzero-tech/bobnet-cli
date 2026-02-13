@@ -55,5 +55,11 @@ jobs:
           chmod +x ~/.local/bin/bobnet
           echo "$HOME/.local/bin" >> $GITHUB_PATH
           
+      - name: Verify bobnet installation
+        run: |
+          echo "PATH: $PATH"
+          echo "which bobnet: $(which bobnet || echo 'not found')"
+          bobnet --version || echo "bobnet command failed with exit code $?"
+          
       - name: Run test suite
         run: ./tests/run-all.sh
