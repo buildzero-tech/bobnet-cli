@@ -85,7 +85,7 @@ get_workspace() {
 
 get_agent_dir() {
     local agent="$1"
-    echo "$BOBNET_ROOT/agents/$agent"
+    echo "$BOBNET_ROOT/vault/agents/$agent"
 }
 
 get_spawn_permissions() {
@@ -505,7 +505,7 @@ cmd_agent() {
             fi
             
             # Copy auth-profiles.json from bob if it exists and target doesn't have it
-            local bob_auth="$BOBNET_ROOT/agents/bob/auth-profiles.json"
+            local bob_auth="$BOBNET_ROOT/vault/agents/bob/auth-profiles.json"
             local target_auth="$ad/auth-profiles.json"
             if [[ -f "$bob_auth" && ! -f "$target_auth" ]]; then
                 cp "$bob_auth" "$target_auth"
@@ -1472,11 +1472,11 @@ EOF
 }
 
 cmd_link() {
-    # Directory-level symlink management
-    # ~/.openclaw/agents -> ~/.bobnet/ultima-thule/agents
+    # Directory-level symlink management (vault migration)
+    # ~/.openclaw/agents -> ~/.bobnet/ultima-thule/vault/agents
     
     local OC_AGENTS="$CONFIG_DIR/agents"
-    local BN_AGENTS="$BOBNET_ROOT/agents"
+    local BN_AGENTS="$BOBNET_ROOT/vault/agents"
     
     case "${1:-status}" in
         -h|--help|help)
@@ -1765,7 +1765,7 @@ EOF
 # Cursor session tracking helpers
 _cursor_sessions_file() {
     local agent="${1:-bob}"
-    echo "$BOBNET_ROOT/agents/$agent/cursor-sessions.json"
+    echo "$BOBNET_ROOT/vault/agents/$agent/cursor-sessions.json"
 }
 
 _cursor_init_sessions() {
@@ -1894,7 +1894,7 @@ EXAMPLES:
   bobnet int cursor --list --all
 
 Sessions are tracked per-agent in:
-  ~/.bobnet/ultima-thule/agents/<agent>/cursor-sessions.json
+  ~/.bobnet/ultima-thule/vault/agents/<agent>/cursor-sessions.json
 
 Requires: cursor-agent (npm install -g @anthropic/cursor-agent)
 EOF
