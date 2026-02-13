@@ -3146,6 +3146,8 @@ cmd_task() {
         show) task_show "$@" ;;
         edit) task_edit "$@" ;;
         delete) task_delete "$@" ;;
+        notify) task_notify "$@" ;;
+        route) task_route "$@" ;;
         -h|--help|help)
             cat <<'EOF'
 USAGE: bobnet task <command> [options]
@@ -3159,12 +3161,14 @@ COMMANDS:
   show <id>             Show task details
   edit <id>             Edit a task
   delete <id>           Delete a task
+  notify <id>           Notify area owner about task
+  route <area>          Show routing info for area
 
 EXAMPLES:
   bobnet task add "Review PR" --area ice9 --priority 5
   bobnet task list --area household
   bobnet task done abc123
-  bobnet task list --pending
+  bobnet task notify abc123
 
 Run 'bobnet task <command> --help' for details.
 EOF
@@ -3451,6 +3455,111 @@ EOF
     sqlite3 "$TASK_DB" "DELETE FROM todos WHERE id = '$full_id';" 2>/dev/null || error "Failed to delete task"
     
     success "Deleted: $text"
+}
+
+task_notify() {
+    local id="$1"
+    
+    if [[ -z "$id" || "$id" == "-h" || "$id" == "--help" ]]; then
+        cat <<'EOF'
+USAGE: bobnet task notify <id>
+
+Notify the area owner agent about a task.
+Uses sessions_send to alert the owning agent.
+
+EXAMPLES:
+  bobnet task notify abc123
+EOF
+        return 0
+    fi
+    
+    local full_id=$(sqlite3 "$TASK_DB" "SELECT id FROM todos WHERE id LIKE '${id}%' LIMIT 1;" 2>/dev/null)
+    [[ -z "$full_id" ]] && error "Task not found: $id"
+    
+    # Get task details
+    local text=$(sqlite3 "$TASK_DB" "SELECT text FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    local bucket=$(sqlite3 "$TASK_DB" "SELECT bucket FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    local priority=$(sqlite3 "$TASK_DB" "SELECT priority FROM todos WHERE id = '$full_id';" 2>/dev/null)
+    
+    # Extract area from bucket
+    local area=""
+    if [[ "$bucket" == *":area:"* ]]; then
+        area="${bucket##*:area:}"
+    fi
+    
+    if [[ -z "$area" ]]; then
+        warn "Task not in an area (bucket: $bucket)"
+        return 0
+    fi
+    
+    # Get area owner
+    local owner=$(sqlite3 "$TASK_DB" "SELECT owner_agent FROM areas WHERE id = '$area';" 2>/dev/null)
+    
+    if [[ -z "$owner" ]]; then
+        warn "Area '$area' has no owner agent"
+        return 0
+    fi
+    
+    # Build notification message
+    local msg="📋 New task in $area: \"$text\" (${full_id:0:8})"
+    [[ "$priority" -ge 4 ]] && msg="🔴 $msg (high priority)"
+    
+    info "Notifying $owner about task..."
+    echo "  Area: $area"
+    echo "  Owner: $owner"
+    echo "  Message: $msg"
+    
+    # Use openclaw to send to agent session
+    local claw=""; command -v openclaw &>/dev/null && claw="openclaw"
+    if [[ -n "$claw" ]]; then
+        # Sessions send to agent
+        $claw sessions send --label "$owner" --message "$msg" 2>/dev/null && success "Notification sent to $owner" || warn "Failed to send notification"
+    else
+        warn "openclaw not found, notification not sent"
+        echo "  Manual: sessions_send({label: '$owner', message: '$msg'})"
+    fi
+}
+
+task_route() {
+    local area="$1"
+    
+    if [[ -z "$area" || "$area" == "-h" || "$area" == "--help" ]]; then
+        cat <<'EOF'
+USAGE: bobnet task route <area>
+
+Show routing information for an area.
+Displays owner agent, collaborators, and Signal group if configured.
+
+EXAMPLES:
+  bobnet task route ice9
+  bobnet task route household
+EOF
+        return 0
+    fi
+    
+    local exists=$(sqlite3 "$TASK_DB" "SELECT id FROM areas WHERE id = '$area';" 2>/dev/null)
+    [[ -z "$exists" ]] && error "Area not found: $area"
+    
+    echo ""
+    echo "Area Routing: $area"
+    echo "========================================"
+    
+    # Area details
+    sqlite3 -line "$TASK_DB" "SELECT name, scope, owner_agent, signal_group_id FROM areas WHERE id = '$area';"
+    
+    echo ""
+    echo "Collaborators:"
+    sqlite3 -header -column "$TASK_DB" "SELECT collaborator_type as type, collaborator_id as id, role FROM area_collaborators WHERE area_id = '$area';"
+    
+    # Check bobnet.json for agent bindings
+    local owner=$(sqlite3 "$TASK_DB" "SELECT owner_agent FROM areas WHERE id = '$area';" 2>/dev/null)
+    if [[ -n "$owner" ]]; then
+        echo ""
+        echo "Owner Agent ($owner) Bindings:"
+        jq -r --arg a "$owner" '.agents[$a].bindings // []' "$BOBNET_SCHEMA" 2>/dev/null | head -10
+    fi
+    
+    echo ""
 }
 
 
