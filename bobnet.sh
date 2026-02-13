@@ -2767,6 +2767,368 @@ trust_import() {
 }
 
 
+# ============================================================================
+# Area Commands - Manage area registry for todo organization
+# ============================================================================
+
+AREA_DB="$BOBNET_ROOT/vault/data/todos.db"
+
+cmd_area() {
+    local subcmd="${1:-help}"
+    shift 2>/dev/null || true
+    
+    case "$subcmd" in
+        init) area_init "$@" ;;
+        create) area_create "$@" ;;
+        list) area_list "$@" ;;
+        show) area_show "$@" ;;
+        add-collaborator) area_add_collaborator "$@" ;;
+        remove-collaborator) area_remove_collaborator "$@" ;;
+        -h|--help|help)
+            cat <<'EOF'
+USAGE: bobnet area <command> [options]
+
+Manage area registry for todo organization.
+
+COMMANDS:
+  init                          Initialize area registry tables
+  create <id>                   Create a new area
+  list                          List all areas
+  show <id>                     Show area details
+  add-collaborator <area> <id>  Add collaborator to area
+  remove-collaborator <area> <id>  Remove collaborator from area
+
+EXAMPLES:
+  bobnet area init --seed              # Initialize with default areas
+  bobnet area create vacation --scope personal --owner olivia
+  bobnet area list --scope work
+  bobnet area show ice9
+  bobnet area add-collaborator ice9 penny --role viewer
+
+Run 'bobnet area <command> --help' for details.
+EOF
+            ;;
+        *) error "Unknown area command: $subcmd" ;;
+    esac
+}
+
+area_init() {
+    local seed=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --seed) seed=true; shift ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet area init [OPTIONS]
+
+Initialize area registry tables in the todo database.
+
+OPTIONS:
+  --seed    Seed with default areas (ice9, buildzero, household, family)
+
+EXAMPLES:
+  bobnet area init
+  bobnet area init --seed
+EOF
+                return 0 ;;
+            *) shift ;;
+        esac
+    done
+    
+    # Check database exists
+    if [[ ! -f "$AREA_DB" ]]; then
+        error "Todo database not found at $AREA_DB. Start todo-app first."
+    fi
+    
+    # Check if already initialized
+    local table_exists=$(sqlite3 "$AREA_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='areas';" 2>/dev/null)
+    if [[ -n "$table_exists" ]]; then
+        info "Area registry already initialized"
+        if [[ "$seed" == "true" ]]; then
+            area_seed
+        fi
+        return 0
+    fi
+    
+    info "Creating area registry tables..."
+    
+    sqlite3 "$AREA_DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS areas (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    owner_agent TEXT,
+    description TEXT,
+    signal_group_id TEXT,
+    sync_config TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    updated_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_areas_scope ON areas(scope);
+CREATE INDEX IF NOT EXISTS idx_areas_owner_agent ON areas(owner_agent);
+
+CREATE TABLE IF NOT EXISTS area_collaborators (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    area_id TEXT NOT NULL,
+    collaborator_type TEXT NOT NULL CHECK (collaborator_type IN ('agent', 'user')),
+    collaborator_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'collaborator', 'viewer')),
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    FOREIGN KEY (area_id) REFERENCES areas(id) ON DELETE CASCADE,
+    UNIQUE(area_id, collaborator_type, collaborator_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collaborators_area ON area_collaborators(area_id);
+
+CREATE TABLE IF NOT EXISTS user_area_defaults (
+    user_id TEXT PRIMARY KEY,
+    default_work_area TEXT,
+    default_personal_area TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+    updated_at INTEGER
+);
+SQL
+    
+    success "Area registry tables created"
+    
+    if [[ "$seed" == "true" ]]; then
+        area_seed
+    fi
+}
+
+area_seed() {
+    info "Seeding default areas..."
+    
+    sqlite3 "$AREA_DB" <<'SQL'
+INSERT OR IGNORE INTO areas (id, name, scope, owner_agent, description)
+VALUES 
+    ('ice9', 'Ice9 Productions', 'work', 'bob', 'Primary consulting client'),
+    ('buildzero', 'BuildZero', 'work', 'bob', 'BuildZero LLC projects'),
+    ('household', 'Household', 'personal', 'olivia', 'Family household tasks'),
+    ('family', 'Family', 'personal', 'olivia', 'Family activities');
+
+INSERT OR IGNORE INTO area_collaborators (area_id, collaborator_type, collaborator_id, role)
+VALUES 
+    ('ice9', 'user', 'james', 'owner'),
+    ('buildzero', 'user', 'james', 'owner'),
+    ('household', 'user', 'james', 'owner'),
+    ('family', 'user', 'james', 'owner'),
+    ('household', 'user', 'penny', 'collaborator'),
+    ('family', 'user', 'penny', 'collaborator'),
+    ('ice9', 'agent', 'bob', 'owner'),
+    ('buildzero', 'agent', 'bob', 'owner'),
+    ('household', 'agent', 'olivia', 'owner'),
+    ('family', 'agent', 'olivia', 'owner');
+
+INSERT OR IGNORE INTO user_area_defaults (user_id, default_work_area, default_personal_area)
+VALUES 
+    ('james', 'ice9', 'household'),
+    ('penny', NULL, 'household');
+SQL
+    
+    success "Default areas seeded"
+}
+
+area_create() {
+    local id="" name="" scope="" owner="" description=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --scope) scope="$2"; shift 2 ;;
+            --owner) owner="$2"; shift 2 ;;
+            --name) name="$2"; shift 2 ;;
+            --description) description="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet area create <id> [OPTIONS]
+
+Create a new area.
+
+OPTIONS:
+  --scope <scope>       Required: work, personal, or meta
+  --owner <agent>       Owning agent (bob, olivia, etc.)
+  --name <name>         Display name (defaults to id)
+  --description <text>  Area description
+
+EXAMPLES:
+  bobnet area create vacation --scope personal --owner olivia
+  bobnet area create project-x --scope work --owner bob --name "Project X"
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$id" ]]; then
+                    id="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$id" ]] && error "Area ID required"
+    [[ -z "$scope" ]] && error "--scope required (work, personal, meta)"
+    [[ "$scope" != "work" && "$scope" != "personal" && "$scope" != "meta" ]] && error "Invalid scope: $scope"
+    
+    [[ -z "$name" ]] && name="$id"
+    
+    sqlite3 "$AREA_DB" "INSERT INTO areas (id, name, scope, owner_agent, description) VALUES ('$id', '$name', '$scope', '$owner', '$description');" 2>/dev/null || error "Failed to create area (already exists?)"
+    
+    # Add owner as collaborator
+    if [[ -n "$owner" ]]; then
+        sqlite3 "$AREA_DB" "INSERT OR IGNORE INTO area_collaborators (area_id, collaborator_type, collaborator_id, role) VALUES ('$id', 'agent', '$owner', 'owner');"
+    fi
+    
+    success "Created area: $id ($scope, owner: ${owner:-none})"
+}
+
+area_list() {
+    local scope=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --scope) scope="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet area list [OPTIONS]
+
+List all areas.
+
+OPTIONS:
+  --scope <scope>   Filter by scope (work, personal, meta)
+
+EXAMPLES:
+  bobnet area list
+  bobnet area list --scope work
+EOF
+                return 0 ;;
+            *) shift ;;
+        esac
+    done
+    
+    local query="SELECT a.id, a.name, a.scope, COALESCE(a.owner_agent, '-') as owner, 
+                 (SELECT COUNT(*) FROM todos WHERE bucket LIKE '%:area:' || a.id) as todos
+                 FROM areas a"
+    
+    if [[ -n "$scope" ]]; then
+        query="$query WHERE a.scope = '$scope'"
+    fi
+    
+    query="$query ORDER BY a.scope, a.name;"
+    
+    echo ""
+    sqlite3 -header -column "$AREA_DB" "$query"
+    echo ""
+}
+
+area_show() {
+    local id="$1"
+    
+    if [[ -z "$id" || "$id" == "-h" || "$id" == "--help" ]]; then
+        cat <<'EOF'
+USAGE: bobnet area show <id>
+
+Show area details including collaborators.
+
+EXAMPLES:
+  bobnet area show ice9
+  bobnet area show household
+EOF
+        return 0
+    fi
+    
+    local exists=$(sqlite3 "$AREA_DB" "SELECT id FROM areas WHERE id = '$id';" 2>/dev/null)
+    [[ -z "$exists" ]] && error "Area not found: $id"
+    
+    echo ""
+    echo "Area: $id"
+    echo "========================================"
+    sqlite3 -line "$AREA_DB" "SELECT name, scope, owner_agent, description FROM areas WHERE id = '$id';"
+    
+    echo ""
+    echo "Collaborators:"
+    sqlite3 -header -column "$AREA_DB" "SELECT collaborator_type as type, collaborator_id as id, role FROM area_collaborators WHERE area_id = '$id';"
+    
+    echo ""
+    echo "Todos:"
+    local todo_count=$(sqlite3 "$AREA_DB" "SELECT COUNT(*) FROM todos WHERE bucket LIKE '%:area:$id';" 2>/dev/null || echo "0")
+    echo "  $todo_count todos in this area"
+    echo ""
+}
+
+area_add_collaborator() {
+    local area="" collab_id="" collab_type="user" role="collaborator"
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --type) collab_type="$2"; shift 2 ;;
+            --role) role="$2"; shift 2 ;;
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet area add-collaborator <area> <id> [OPTIONS]
+
+Add a collaborator to an area.
+
+OPTIONS:
+  --type <type>   user or agent (default: user)
+  --role <role>   owner, collaborator, or viewer (default: collaborator)
+
+EXAMPLES:
+  bobnet area add-collaborator ice9 penny
+  bobnet area add-collaborator household bob --type agent --role viewer
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$area" ]]; then
+                    area="$1"
+                elif [[ -z "$collab_id" ]]; then
+                    collab_id="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$area" ]] && error "Area ID required"
+    [[ -z "$collab_id" ]] && error "Collaborator ID required"
+    
+    sqlite3 "$AREA_DB" "INSERT OR REPLACE INTO area_collaborators (area_id, collaborator_type, collaborator_id, role) VALUES ('$area', '$collab_type', '$collab_id', '$role');" 2>/dev/null || error "Failed to add collaborator"
+    
+    success "Added $collab_type '$collab_id' as $role to area '$area'"
+}
+
+area_remove_collaborator() {
+    local area="" collab_id=""
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                cat <<'EOF'
+USAGE: bobnet area remove-collaborator <area> <id>
+
+Remove a collaborator from an area.
+
+EXAMPLES:
+  bobnet area remove-collaborator ice9 penny
+EOF
+                return 0 ;;
+            *)
+                if [[ -z "$area" ]]; then
+                    area="$1"
+                elif [[ -z "$collab_id" ]]; then
+                    collab_id="$1"
+                fi
+                shift ;;
+        esac
+    done
+    
+    [[ -z "$area" ]] && error "Area ID required"
+    [[ -z "$collab_id" ]] && error "Collaborator ID required"
+    
+    sqlite3 "$AREA_DB" "DELETE FROM area_collaborators WHERE area_id = '$area' AND collaborator_id = '$collab_id';" 2>/dev/null || error "Failed to remove collaborator"
+    
+    success "Removed '$collab_id' from area '$area'"
+}
+
+
 cmd_restart() {
     # Parse arguments
     local delay=10
@@ -6489,6 +6851,7 @@ bobnet_main() {
         lock) cmd_lock ;;
         update) cmd_update ;;
         trust) shift; cmd_trust "$@" ;;
+        area) shift; cmd_area "$@" ;;
         restart) shift; cmd_restart "$@" ;;
         upgrade) shift; cmd_upgrade "$@" ;;
         help|--help|-h) cmd_help ;;
