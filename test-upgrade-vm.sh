@@ -156,7 +156,7 @@ main() {
     fi
     
     if [[ ! -d "$repo_dir" ]]; then
-        mkdir -p "$repo_dir"/{config,workspace/bob,agents/bob}
+        mkdir -p "$repo_dir"/{config,workspace/bob,vault/agents/bob,vault/data,vault/config}
         
         # Create minimal bobnet.json
         cat > "$repo_dir/config/bobnet.json" << 'EOF'
